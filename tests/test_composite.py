@@ -11,6 +11,7 @@ import pytest
 
 from photoman.composite import (
     composite_patch,
+    composite_patch_into_bytes,
     downscale_factor,
     plan_crop,
     ring_delta,
@@ -215,3 +216,99 @@ class TestRingDelta:
         mask = np.ones((8, 8), dtype=bool)
 
         assert np.isnan(ring_delta(original, original.copy(), mask, (0, 0, 8, 8)))
+
+
+class TestByteLevelComposite:
+    """實際使用的那條路徑——底圖存原檔位元組（§6.1c）。
+
+    這裡的保證比 float 版本更強：遮罩外是**字面上的位元組複製**，
+    那些像素根本沒有經過任何浮點運算。
+    """
+
+    def _fixture(self):
+        rng = np.random.default_rng(20260918)
+        base = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
+        patch = rng.integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+        alpha = np.zeros((64, 64), dtype=np.float32)
+        alpha[16:48, 16:48] = 1.0
+        return base, patch, alpha
+
+    def test_outside_bytes_are_identical(self) -> None:
+        base, patch, alpha = self._fixture()
+
+        result = composite_patch_into_bytes(base, patch, (16, 16, 32, 32), alpha)
+
+        untouched = alpha == 0.0
+        np.testing.assert_array_equal(result[untouched], base[untouched])
+
+    def test_outside_is_identical_even_with_a_soft_edge(self) -> None:
+        """羽化帶的 alpha 很小但仍然大於 0。
+
+        合成器只寫入 ``alpha > 0``，所以羽化帶會被寫入（那是它的工作），
+        但羽化帶以外必須完全不動。
+        """
+        base, patch, alpha = self._fixture()
+        # 造一個由中心向外漸變的 alpha
+        yy, xx = np.mgrid[0:64, 0:64]
+        distance = np.sqrt((yy - 32.0) ** 2 + (xx - 32.0) ** 2)
+        alpha = np.clip((24.0 - distance) / 8.0, 0.0, 1.0).astype(np.float32)
+
+        result = composite_patch_into_bytes(base, patch, (16, 16, 32, 32), alpha)
+
+        untouched = alpha == 0.0
+        np.testing.assert_array_equal(result[untouched], base[untouched])
+
+    def test_inside_is_replaced(self) -> None:
+        base, patch, alpha = self._fixture()
+
+        result = composite_patch_into_bytes(base, patch, (16, 16, 32, 32), alpha)
+
+        np.testing.assert_array_equal(result[16:48, 16:48], patch)
+
+    def test_base_is_not_mutated(self) -> None:
+        base, patch, alpha = self._fixture()
+        before = base.copy()
+
+        composite_patch_into_bytes(base, patch, (16, 16, 32, 32), alpha)
+
+        np.testing.assert_array_equal(base, before)
+
+    def test_empty_alpha_returns_an_exact_copy(self) -> None:
+        base, patch, _ = self._fixture()
+
+        result = composite_patch_into_bytes(
+            base, patch, (16, 16, 32, 32), np.zeros((64, 64), dtype=np.float32)
+        )
+
+        np.testing.assert_array_equal(result, base)
+
+    def test_output_is_uint8(self) -> None:
+        base, patch, alpha = self._fixture()
+
+        result = composite_patch_into_bytes(base, patch, (16, 16, 32, 32), alpha)
+
+        assert result.dtype == np.uint8
+
+    def test_float_input_is_refused(self) -> None:
+        """只處理 uint8——收到 float 代表呼叫方搞錯了工作空間。"""
+        base, patch, alpha = self._fixture()
+
+        with pytest.raises(ValueError, match="只處理 uint8"):
+            composite_patch_into_bytes(base.astype(np.float32), patch, (16, 16, 32, 32), alpha)
+
+    def test_a_whole_image_round_trip_leaves_bytes_alone(self) -> None:
+        """用一張較大的圖走完整條路徑，確認沒有一個位元組被動過。
+
+        這是最接近真實使用情境的測試。
+        """
+        rng = np.random.default_rng(7)
+        base = rng.integers(0, 256, size=(256, 384, 3), dtype=np.uint8)
+        patch = rng.integers(0, 256, size=(80, 100, 3), dtype=np.uint8)
+        alpha = np.zeros((256, 384), dtype=np.float32)
+        alpha[60:140, 200:300] = 1.0
+
+        result = composite_patch_into_bytes(base, patch, (200, 60, 100, 80), alpha)
+
+        untouched = alpha == 0.0
+        differing = np.count_nonzero(result[untouched] != base[untouched])
+        assert differing == 0, f"{differing} 個遮罩外的位元組被動過"

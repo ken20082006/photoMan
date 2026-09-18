@@ -59,10 +59,25 @@ class SourceInfo:
 
 @dataclass(frozen=True)
 class LoadedImage:
-    """已載入的原圖：像素在內部工作空間（線性光 sRGB、float32）。"""
+    """已載入的原圖：像素在內部工作空間（線性光 sRGB、float32）。
+
+    ⚠️ 42 MP 的照片這會佔 506 MB。**這是分析用的表示，不是儲存格式。**
+    編輯 pipeline 要用 :func:`load_srgb`（§6.1c）。
+    """
 
     info: SourceInfo
     linear: np.ndarray
+
+
+@dataclass(frozen=True)
+class LoadedSrgb:
+    """底圖：**uint8 sRGB 位元組**，是編輯 pipeline 的實際儲存格式（§6.1c）。
+
+    42 MP 只佔 127 MB，而且合成時遮罩外是字面上的位元組複製。
+    """
+
+    info: SourceInfo
+    srgb: np.ndarray
 
 
 def _sha256(path: Path) -> str:
@@ -113,34 +128,40 @@ def _convert_to_srgb(image: Image.Image) -> Image.Image:
         return image
 
 
+def _capture_info(opened: Image.Image, path: Path) -> SourceInfo:
+    """由已開啟的影像捕獲完整描述。載入與匯出都要用同一份。"""
+    raw_icc = opened.info.get("icc_profile")
+    return SourceInfo(
+        path=path,
+        sha256=_sha256(path),
+        format=opened.format or "UNKNOWN",
+        width=opened.width,
+        height=opened.height,
+        bit_depth=_bit_depth(opened),
+        icc_profile=raw_icc,
+        icc_description=(
+            _describe_profile(ImageCms.ImageCmsProfile(io.BytesIO(raw_icc))) if raw_icc else None
+        ),
+        exif=opened.info.get("exif"),
+        had_orientation_tag=_EXIF_ORIENTATION in opened.getexif(),
+    )
+
+
 def load(path: str | Path) -> LoadedImage:
     """載入原圖，轉成內部工作空間（線性光 sRGB、float32）。
 
     回傳的 ``linear`` 是 ``float32``、範圍大致 ``[0,1]``，但**不裁剪**——
     色彩轉換可以在極端顏色上產生稍微超出範圍的值，過早裁剪會失去資訊。
+
+    ⚠️ **這是分析用的表示，不是儲存格式**（§6.1c）。42 MP 佔 506 MB。
+    編輯 pipeline 要用 :func:`load_srgb`。
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"找不到檔案：{path}")
 
     with Image.open(path) as opened:
-        info = SourceInfo(
-            path=path,
-            sha256=_sha256(path),
-            format=opened.format or "UNKNOWN",
-            width=opened.width,
-            height=opened.height,
-            bit_depth=_bit_depth(opened),
-            icc_profile=opened.info.get("icc_profile"),
-            icc_description=(
-                _describe_profile(ImageCms.ImageCmsProfile(io.BytesIO(opened.info["icc_profile"])))
-                if opened.info.get("icc_profile")
-                else None
-            ),
-            exif=opened.info.get("exif"),
-            had_orientation_tag=_EXIF_ORIENTATION in opened.getexif(),
-        )
-
+        info = _capture_info(opened, path)
         # 先套用 EXIF 方向再轉色彩——轉色彩是有方向的運算，
         # 在躺平的圖上做要多一次轉置，而且容易寫錯。
         upright = ImageOps.exif_transpose(opened)
@@ -148,6 +169,35 @@ def load(path: str | Path) -> LoadedImage:
         array = _to_float01(np.asarray(converted.convert("RGB")))
 
     return LoadedImage(info=info, linear=srgb_to_linear(array))
+
+
+def load_srgb(path: str | Path) -> LoadedSrgb:
+    """載入原圖為 **uint8 sRGB**——編輯 pipeline 的實際底圖（§6.1c）。
+
+    與 :func:`load` 的分工：
+
+    - :func:`load` 回傳整張圖的線性光 float32。那是**分析用的表示**
+      （42 MP 要 506 MB），適合用來做預覽或統計，不適合當底圖。
+    - 本函數回傳原檔編碼的位元組（42 MP 只要 127 MB）。
+      合成時遮罩外是**字面上的位元組複製**，那些像素根本沒有
+      經過任何浮點運算。
+
+    兩者的像素內容一致（同一個 ICC 轉換、同一個 EXIF 方向套用），
+    差別只在表示方式。
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"找不到檔案：{path}")
+
+    with Image.open(path) as opened:
+        info = _capture_info(opened, path)
+        upright = ImageOps.exif_transpose(opened)
+        converted = _convert_to_srgb(upright)
+        array = np.asarray(converted.convert("RGB"))
+
+    if array.dtype != np.uint8:
+        raise ValueError(f"底圖必須是 uint8，得到 {array.dtype}")
+    return LoadedSrgb(info=info, srgb=array)
 
 
 def save(

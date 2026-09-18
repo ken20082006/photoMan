@@ -12,7 +12,7 @@ import pytest
 from PIL import Image
 
 from photoman.color import linear_to_srgb, srgb_to_linear
-from photoman.image import load, save
+from photoman.image import load, load_srgb, save
 
 _EXIF_ORIENTATION = 274
 
@@ -124,6 +124,55 @@ class TestExifOrientation:
         loaded = load(source)
 
         assert loaded.linear.shape[:2] == (20, 40)
+
+
+class TestSrgbBase:
+    """底圖以原檔位元組儲存（§6.1c）——42 MP 由 506 MB 降到 127 MB。
+
+    而且合成時遮罩外是**字面上的位元組複製**，不是「浮點運算後剛好相等」。
+    """
+
+    def test_returns_uint8(self, tmp_path) -> None:
+        source = tmp_path / "in.png"
+        _write_png(source, np.full((8, 8, 3), 128, dtype=np.uint8))
+
+        loaded = load_srgb(source)
+
+        assert loaded.srgb.dtype == np.uint8
+
+    def test_agrees_with_the_linear_loader(self, tmp_path) -> None:
+        """兩個載入器必須描述同一張圖，差別只在表示方式。"""
+        rng = np.random.default_rng(20260918)
+        original = rng.integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+        source = tmp_path / "in.png"
+        _write_png(source, original)
+
+        srgb = load_srgb(source)
+        linear = load(source)
+
+        np.testing.assert_array_equal(srgb.srgb, original)
+        # linear.linear 是線性光，要先轉回 sRGB 才能與位元組比較。
+        back = np.clip(linear_to_srgb(linear.linear), 0.0, 1.0)
+        np.testing.assert_array_equal(srgb.srgb, np.floor(back * 255.0 + 0.5).astype(np.uint8))
+
+    def test_captures_the_same_metadata(self, tmp_path) -> None:
+        source = tmp_path / "in.png"
+        _write_png(source, np.zeros((8, 8, 3), dtype=np.uint8))
+
+        assert load_srgb(source).info.sha256 == load(source).info.sha256
+
+    def test_applies_exif_orientation(self, tmp_path) -> None:
+        image = Image.new("RGB", (40, 20), (200, 100, 50))
+        exif = Image.Exif()
+        exif[_EXIF_ORIENTATION] = 6
+        source = tmp_path / "rotated.jpg"
+        image.save(source, exif=exif)
+
+        assert load_srgb(source).srgb.shape[:2] == (40, 20)
+
+    def test_missing_file_is_reported_clearly(self, tmp_path) -> None:
+        with pytest.raises(FileNotFoundError, match="找不到檔案"):
+            load_srgb(tmp_path / "does-not-exist.png")
 
 
 class TestWorkingSpace:

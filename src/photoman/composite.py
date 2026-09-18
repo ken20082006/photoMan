@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from photoman.color import linear_to_srgb, srgb_to_linear
+
 CropBox = tuple[int, int, int, int]  # (x, y, w, h)
 
 
@@ -169,3 +171,66 @@ def ring_delta(
 
     difference = np.abs(returned[ring].astype(np.int16) - original[ring].astype(np.int16))
     return float(difference.max())
+
+
+def composite_patch_into_bytes(
+    base: np.ndarray,
+    patch: np.ndarray,
+    crop: CropBox,
+    alpha: np.ndarray,
+) -> np.ndarray:
+    """在 **uint8 sRGB** 層合成——底圖存原檔位元組，這是實際使用的那一個。
+
+    與 :func:`composite_patch` 的分工：
+
+    - :func:`composite_patch` 是**數學核心**（線性光 float32），
+      負責混合本身，也是所有數值測試的對象。
+    - 本函數是**儲存層的入口**，負責 uint8 ↔ 線性光的轉換，
+      以及把「遮罩外不變」落實成**字面上的位元組複製**。
+
+    為甚麼要在 uint8 層做（§6.1c）：底圖以原檔編碼儲存（42 MP 是 127 MB，
+    而不是 float32 的 506 MB）。合成時複製一份原圖位元組，只在遮罩內寫入——
+    **遮罩外的像素根本沒有經過任何浮點運算，所以不可能有往返誤差。**
+
+    混合本身仍然在線性光做（§5.5）——在 gamma 編碼空間混合會出現暗邊或亮邊。
+
+    回傳新的 uint8 陣列。``alpha == 0`` 的位元組與 ``base`` 完全相同。
+    """
+    if base.dtype != np.uint8 or patch.dtype != np.uint8:
+        raise ValueError(f"這個函數只處理 uint8，收到 {base.dtype} 與 {patch.dtype}")
+
+    x, y, width, height = crop
+    if patch.shape[:2] != (height, width):
+        raise ValueError(f"生成塊的尺寸 {patch.shape[:2]} 不等於裁切框的尺寸 {(height, width)}")
+
+    region_alpha = alpha[y : y + height, x : x + width]
+    inside = region_alpha > 0.0
+    if not inside.any():
+        return base.copy()
+
+    # 只有裁切區需要線性化——這是這個設計省記憶體的地方。
+    base_region = srgb_to_linear(base[y : y + height, x : x + width].astype(np.float32) / 255.0)
+    patch_region = srgb_to_linear(patch.astype(np.float32) / 255.0)
+
+    weight = region_alpha[inside]
+    if base_region.ndim == 3:
+        weight = weight[:, None]
+    blended = base_region[inside] * (1.0 - weight) + patch_region[inside] * weight
+
+    result_region = base_region.copy()
+    result_region[inside] = blended
+
+    encoded = np.floor(np.clip(linear_to_srgb(result_region), 0.0, 1.0) * 255.0 + 0.5).astype(
+        np.uint8
+    )
+
+    # ★ 只寫入遮罩內的像素。
+    #
+    # 刻意**不**寫回整個裁切區——那樣做會令遮罩外的像素經過
+    # uint8 → 線性光 → uint8 的往返，於是保證就建立在「往返精確」
+    # 這個假設上。實測那個往返確實精確，但保證不應該依賴它：
+    # 只寫入內部，遮罩外的位元組就是真正未被碰過的。
+    result = base.copy()
+    target = result[y : y + height, x : x + width]
+    target[inside] = encoded[inside]
+    return result

@@ -25,7 +25,7 @@
 | 階段 | 內容 | 狀態 |
 |---|---|---|
 | — | 設計文件 | ✅ v0.2，核心機制已定稿 |
-| **P0** | 資料模型、保真匯入匯出、**合成器** | ⚠️ **大部分**：合成器、遮罩、色彩空間、匯入匯出完成並有測試 |
+| **P0** | 資料模型、保真匯入匯出、**合成器** | ✅ **程式完成**——缺介面與 CLI |
 | P1 | 點擊分割、局部生成（移除物件） | 未開始 |
 | P2 | 確定性調整 | 未開始 |
 | P3 | 修補舊照片 | 未開始 |
@@ -37,18 +37,22 @@
 src/photoman/
   color.py       sRGB ↔ 線性光（負值不產生 NaN）
   mask.py        填內洞、去斑、膨脹、兩個遮罩的衍生
-  composite.py   ★ 合成器 + 校驗環量度 + 裁切規劃
-  image.py       保真匯入匯出（HEIC、ICC、EXIF 方向）
+  composite.py   ★ 合成器（float 與 uint8 兩層）+ 校驗環量度 + 裁切規劃
+  image.py       保真匯入匯出（HEIC、ICC、EXIF 方向）；load_srgb 取底圖位元組
+  project.py     圖層資料模型、永久 ID、快取鍵鏈
+  store.py       專案目錄讀寫、原子儲存、原檔核對
 ```
 
-**測試：54 個全部通過**（`./.venv/Scripts/python.exe -m pytest -q`，約 1.5 秒）。
-其中 `tests/test_composite.py` 與 `tests/test_image.py` 是本案最重要的兩個——
-它們合起來守住整條保證鏈：由原檔到匯出檔，遮罩外逐 bit 不變。
+**測試：89 個全部通過**（`./.venv/Scripts/python.exe -m pytest -q`，約 0.8 秒）。
+其中三個檔是本案最重要的：
+`test_composite.py`、`test_image.py`、`test_project.py`——
+它們合起來守住整條保證鏈，以及「重跑不覆蓋人工修改」。
 
-**已在四張真實照片上驗證**（`test_image/`，已被 gitignore）：
-HEIC 讀得到、Display P3 色彩管理正確、往返精確。
+**已用真實照片端到端跑過**（`sandbox/e2e.py`）：
+建立專案 → 圈選 → 合成 → 儲存 → 重開 → 快取命中，全程通過，
+遮罩外被動過的位元組 **0** 個。
 
-**尚未做：** 沒有任何介面、沒有模型、沒有 CLI、沒有圖層資料模型。
+**尚未做：** 沒有任何介面、沒有模型、沒有 CLI。
 
 ---
 
@@ -183,12 +187,8 @@ Bria GenFill 聲稱「遮罩外像素完全保留，逐像素完美」，
 
 **建議順序：**
 
-1. ~~保真匯入匯出~~ ✅ **已完成**（`image.py`，54 個測試通過，
-   並在四張真實照片上驗證過）。
-2. **圖層資料模型 + project.json 讀寫** —— 依 `design.md` §6.2 的 schema。
-   永久 ID、`locked` 旗標、快取鍵。
-   ⚠️ **動工前先定案記憶體策略**（`design.md` §14 第 18 項）——
-   它會影響資料模型存甚麼、以及要不要存原始位元組。
+1. ~~保真匯入匯出~~ ✅ **已完成**（`image.py`）
+2. ~~圖層資料模型 + project.json~~ ✅ **已完成**（`project.py`、`store.py`）
 3. **Konva 畫布 + FastAPI 伺服器** —— 沿用 mangaMan 那套（無建置步驟、
    完全離線、Konva 已內嵌）。
 4. **P1：點擊分割（MobileSAM）+ LaMa inpainting** ——

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 模型權重：數百 MB，而且部分權重的授權與本 repo 不同。
+# 用 setup 腳本重新下載，不要提交。
+models/
+
+# ★ 使用者的照片：有版權，而且可能是私人照片。
+# 提交前務必確認 git status 沒有出現任何圖片檔。
+projects/
+inbox/
+sandbox/
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.webp
+*.bmp
+*.heic
+!docs/**/*.png
+
+# 機器專屬，換機即失效
+*.lnk
+logs/

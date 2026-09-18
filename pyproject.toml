@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photoman"
+version = "0.1.0"
+description = "Local-first photo editor: the AI touches only the masked region, the compositor guarantees the rest is bit-identical"
+readme = "README.md"
+requires-python = ">=3.12"
+# MIT is honest here, unlike mangaMan: the engines this project targets are
+# all permissive — MobileSAM (Apache-2.0), SCUNet (Apache-2.0), Real-ESRGAN
+# (BSD-3), the MIT Microsoft old-photo pipeline. The non-commercial traps in
+# this space (EdgeSAM, CodeFormer, SUPIR — see docs/design.md §13.2) are
+# deliberately not used. Re-verify the whole table before any distribution;
+# personal use does not trigger any of it.
+license = "MIT"
+
+# P0 has no ML dependencies. Segmentation and inpainting arrive behind
+# Protocol adapters, so the compositor and its guarantee can be built and
+# tested with no model downloaded at all — which is the point: the
+# byte-identical guarantee is a property of our code, not of any model.
+dependencies = [
+    "pydantic>=2.9",
+    "pillow>=10.4",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",  # Telea inpainting, mask morphology
+    "typer>=0.12",
+    "rich>=13.9",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",  # drag-and-drop upload
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+models = [
+    "onnxruntime>=1.20",      # MobileSAM
+    "huggingface_hub>=0.26",  # weight download
+]
+
+[project.scripts]
+photoman = "photoman.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photoman"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

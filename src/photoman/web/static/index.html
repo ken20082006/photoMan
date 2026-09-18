@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>photoMan</title>
+<script src="/static/konva.min.js"></script>
+<style>
+  :root {
+    --bg: #1c1f24; --panel: #262b32; --line: #363d46;
+    --text: #e8eaed; --dim: #9aa4b0; --accent: #4a9eff; --danger: #e5534b;
+    --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.6 "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 10px 18px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .5px; }
+  header .spacer { flex: 1; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage-wrap { flex: 1; position: relative; overflow: hidden; background: #14161a; }
+  aside {
+    width: 330px; background: var(--panel); border-left: 1px solid var(--line);
+    padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+  }
+  .group { display: flex; flex-direction: column; gap: 9px; }
+  .group h2 {
+    font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
+    letter-spacing: 1.2px; text-transform: none;
+  }
+  button {
+    padding: 11px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: #30363e; color: var(--text); font: inherit; cursor: pointer;
+    text-align: left; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { background: #3a424c; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06203f; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #63b0ff; }
+  button.on { border-color: var(--accent); background: #2c3d52; }
+  button small { display: block; color: var(--dim); font-size: 12px; font-weight: 400; margin-top: 2px; }
+  button.primary small { color: #1a3f66; }
+  .row { display: flex; gap: 8px; }
+  .row > button { flex: 1; }
+  .hint { font-size: 13px; color: var(--dim); margin: 0; }
+  .stat { font-size: 13px; color: var(--dim); }
+  .stat b { color: var(--text); font-weight: 600; }
+  .banner {
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+    background: #3a2d1a; border: 1px solid #5c4520; color: #f0c674;
+  }
+  .banner.err { background: #3a1f1d; border-color: #6b2b26; color: #f0a8a2; }
+  #drop {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; text-align: center;
+    color: var(--dim); padding: 40px;
+  }
+  #drop.hot { background: #1e2a38; color: var(--text); }
+  #drop h2 { color: var(--text); font-size: 20px; margin: 0; font-weight: 600; }
+  #drop p { margin: 0; max-width: 420px; }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal[hidden] { display: none; }
+  .modal .box {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 22px; width: 440px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal h2 { margin: 0; font-size: 16px; }
+  input[type=password], input[type=text] {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: #1c1f24; color: var(--text); font: inherit;
+  }
+  label { font-size: 13px; color: var(--dim); }
+  .busy {
+    position: absolute; inset: 0; background: rgba(20,22,26,.72);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+    flex-direction: column; gap: 12px;
+  }
+  .busy[hidden] { display: none; }
+  .spin {
+    width: 34px; height: 34px; border: 3px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>photoMan</h1>
+  <span class="stat" id="file-label"></span>
+  <span class="spacer"></span>
+  <button id="btn-open" style="padding:7px 12px">開啟圖片</button>
+  <button id="btn-settings" style="padding:7px 12px">設定</button>
+</header>
+
+<main>
+  <div id="stage-wrap">
+    <div id="drop">
+      <h2>把照片拖進來</h2>
+      <p>或者按下面的按鈕選一張。照片只會留在這部電腦，不會上傳到任何地方。</p>
+      <button class="primary" id="btn-pick" style="text-align:center">選擇照片</button>
+    </div>
+    <div class="busy" id="busy" hidden><div class="spin"></div><div id="busy-text">處理中…</div></div>
+  </div>
+
+  <aside>
+    <div class="banner" id="models-banner" hidden></div>
+    <div class="banner err" id="error-banner" hidden></div>
+
+    <div class="group">
+      <h2>第一步：指一下要改的東西</h2>
+      <p class="hint">在照片上按一下那件東西，它就會被選中。</p>
+      <div class="row">
+        <button id="tool-add" class="on">選取<small>按一下物件</small></button>
+        <button id="tool-sub">排除<small>按一下多選的部分</small></button>
+      </div>
+      <div class="stat" id="mask-stat">未選取任何東西</div>
+      <button id="btn-clear">清除選取</button>
+    </div>
+
+    <div class="group">
+      <h2>第二步：移除</h2>
+      <button class="primary" id="btn-apply" disabled>
+        移除選中的東西
+        <small id="apply-hint">先選取一樣東西</small>
+      </button>
+    </div>
+
+    <div class="group">
+      <h2>第三步：看結果</h2>
+      <div class="row">
+        <button id="view-before">看原圖</button>
+        <button id="view-after">看成品</button>
+      </div>
+      <div class="stat" id="result-stat"></div>
+      <button id="btn-export" disabled>匯出成品（原解析度）</button>
+    </div>
+
+    <div class="group">
+      <h2>顯示</h2>
+      <p class="hint">滾輪縮放，拖曳移動。要對準細節時把它放大。</p>
+      <button id="btn-fit">fit to window</button>
+    </div>
+  </aside>
+</main>
+
+<div class="modal" id="settings" hidden>
+  <div class="box">
+    <h2>設定</h2>
+    <label for="api-key">OpenRouter API key</label>
+    <input type="password" id="api-key" placeholder="sk-or-v1-…">
+    <p class="hint" style="margin:0">
+      只在使用雲端模型時才需要。預設的移除功能完全在本機執行，不需要 key。
+    </p>
+    <div class="row">
+      <button id="settings-cancel">取消</button>
+      <button class="primary" id="settings-save" style="text-align:center">儲存</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept="image/*" hidden>
+
+<script>
+"use strict";
+
+const IMG = { x: 0, y: 0 };
+let stage, imageLayer, maskLayer, maskImage, photoImage;
+let previewImageURL = null, maskOverlayURL = null, resultImageURL = null;
+let viewingResult = false;
+let tool = "add";
+
+const $ = (id) => document.getElementById(id);
+
+function showBusy(text) { $("busy-text").textContent = text; $("busy").hidden = false; }
+function hideBusy() { $("busy").hidden = true; }
+
+function showError(message) {
+  const banner = $("error-banner");
+  banner.textContent = message;
+  banner.hidden = !message;
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+  return payload;
+}
+
+// ── 畫布 ────────────────────────────────────────────────────────
+
+function buildStage() {
+  stage = new Konva.Stage({ container: "stage-wrap", width: 100, height: 100 });
+  imageLayer = new Konva.Layer();
+  maskLayer = new Konva.Layer();
+  stage.add(imageLayer);
+  stage.add(maskLayer);
+
+  stage.on("wheel", (event) => {
+    event.evt.preventDefault();
+    const scaleBy = 1.08;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    const old = stage.scaleX();
+    const next = event.evt.deltaY < 0 ? old * scaleBy : old / scaleBy;
+    const clamped = Math.max(0.05, Math.min(20, next));
+    const origin = { x: (pointer.x - stage.x()) / old, y: (pointer.y - stage.y()) / old };
+    stage.scale({ x: clamped, y: clamped });
+    stage.position({ x: pointer.x - origin.x * clamped, y: pointer.y - origin.y * clamped });
+  });
+
+  window.addEventListener("resize", fitToWindow);
+  return stage;
+}
+
+function fitToWindow() {
+  if (!photoImage) return;
+  const wrap = $("stage-wrap");
+  stage.size({ width: wrap.clientWidth, height: wrap.clientHeight });
+  const scale = Math.min(
+    wrap.clientWidth / previewImageURL_width(),
+    wrap.clientHeight / previewImageURL_height(),
+    1
+  );
+  stage.scale({ x: scale, y: scale });
+  stage.position({
+    x: (wrap.clientWidth - previewImageURL_width() * scale) / 2,
+    y: (wrap.clientHeight - previewImageURL_height() * scale) / 2,
+  });
+  stage.batchDraw();
+}
+
+let previewSize = { width: 0, height: 0 };
+function previewImageURL_width() { return previewSize.width; }
+function previewImageURL_height() { return previewSize.height; }
+
+function loadKonvaImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("圖片載入失敗"));
+    image.src = url;
+  });
+}
+
+async function setPhoto(url, size) {
+  previewSize = size;
+  const image = await loadKonvaImage(url);
+  imageLayer.destroyChildren();
+  photoImage = new Konva.Image({ image, x: 0, y: 0, width: size.width, height: size.height });
+  imageLayer.add(photoImage);
+  fitToWindow();
+}
+
+async function setOverlay(url) {
+  maskLayer.destroyChildren();
+  maskImage = null;
+  maskOverlayURL = url;
+  if (!url) { maskLayer.batchDraw(); return; }
+  const image = await loadKonvaImage(url);
+  maskImage = new Konva.Image({
+    image, x: 0, y: 0, width: previewSize.width, height: previewSize.height,
+    listening: false,
+  });
+  maskLayer.add(maskImage);
+  maskLayer.batchDraw();
+}
+
+// ── 點擊選取 ────────────────────────────────────────────────────
+
+function pointerToImage() {
+  const position = stage.getRelativePointerPosition();
+  if (!position) return null;
+  if (position.x < 0 || position.y < 0 ||
+      position.x >= previewSize.width || position.y >= previewSize.height) return null;
+  return position;
+}
+
+async function clickSelect() {
+  const position = pointerToImage();
+  if (!position) return;
+  showBusy("選取中…");
+  try {
+    const payload = await api("/api/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: position.x, y: position.y, mode: tool }),
+    });
+    await setOverlay(payload.overlay);
+    updateMaskStat(payload);
+    clearResult();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideBusy();
+  }
+}
+
+function updateMaskStat(payload) {
+  const pixels = payload.mask_pixels || 0;
+  $("mask-stat").textContent = pixels
+    ? `已選取 ${pixels.toLocaleString()} 個像素`
+    : "未選取任何東西";
+  $("btn-apply").disabled = !pixels;
+  $("apply-hint").textContent = pixels ? "會用本機模型填補" : "先選取一樣東西";
+}
+
+// ── 流程 ────────────────────────────────────────────────────────
+
+async function openFile(file) {
+  const form = new FormData();
+  form.append("file", file);
+  showBusy("開啟中…");
+  try {
+    const state = await api("/api/upload", { method: "POST", body: form });
+    await applyState(state);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideBusy();
+  }
+}
+
+async function applyState(state) {
+  $("drop").hidden = state.opened;
+  $("file-label").textContent = state.opened
+    ? `${state.display_name || state.filename}　${state.width}×${state.height}`
+    : "";
+  if (!state.opened) return;
+
+  const preview = await api("/api/preview");
+  await setPhoto(preview.image, { width: state.preview_width, height: state.preview_height });
+  await setOverlay(null);
+  clearResult();
+  updateMaskStat({ mask_pixels: 0 });
+
+  const banner = $("models-banner");
+  const missing = [];
+  if (!state.models_ready.sam) missing.push("物件選取（MobileSAM）");
+  if (!state.models_ready.lama) missing.push("移除（LaMa）");
+  if (missing.length) {
+    banner.textContent = `未下載：${missing.join("、")}。見 docs/PROGRESS.md 的下載說明。`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function clearResult() {
+  resultImageURL = null;
+  viewingResult = false;
+  $("btn-export").disabled = true;
+  $("result-stat").textContent = "";
+  $("view-after").classList.remove("on");
+  $("view-before").classList.remove("on");
+}
+
+async function runApply() {
+  showBusy("移除中…（本機模型，約 10–30 秒）");
+  try {
+    const started = performance.now();
+    const payload = await api("/api/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method: "lama" }),
+    });
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    resultImageURL = payload.image;
+    $("btn-export").disabled = false;
+    const checksum = payload.checksum;
+    $("result-stat").textContent =
+      `完成，用時 ${seconds} 秒。選取範圍以外完全沒有改動。`;
+    await showAfter();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideBusy();
+  }
+}
+
+async function showAfter() {
+  if (!resultImageURL) return;
+  viewingResult = true;
+  await setPhoto(resultImageURL, previewSize);
+  $("view-after").classList.add("on");
+  $("view-before").classList.remove("on");
+  if (maskOverlayURL) await setOverlay(null);
+}
+
+async function showBefore() {
+  const preview = await api("/api/preview");
+  viewingResult = false;
+  await setPhoto(preview.image, previewSize);
+  $("view-before").classList.add("on");
+  $("view-after").classList.remove("on");
+  if (maskOverlayURL) await setOverlay(maskOverlayURL);
+}
+
+// ── 事件綁定 ────────────────────────────────────────────────────
+
+function bind() {
+  $("btn-pick").onclick = $("btn-open").onclick = () => $("file-input").click();
+  $("file-input").onchange = (event) => {
+    if (event.target.files[0]) openFile(event.target.files[0]);
+    event.target.value = "";
+  };
+
+  const wrap = $("stage-wrap");
+  wrap.addEventListener("dragover", (event) => { event.preventDefault(); $("drop").classList.add("hot"); });
+  wrap.addEventListener("dragleave", () => $("drop").classList.remove("hot"));
+  wrap.addEventListener("drop", (event) => {
+    event.preventDefault();
+    $("drop").classList.remove("hot");
+    if (event.dataTransfer.files[0]) openFile(event.dataTransfer.files[0]);
+  });
+
+  $("tool-add").onclick = () => setTool("add");
+  $("tool-sub").onclick = () => setTool("subtract");
+  $("btn-clear").onclick = async () => {
+    if (!stage || $("drop").hidden === false) return;
+    const payload = await api("/api/clear_mask", { method: "POST" });
+    await setOverlay(payload.overlay);
+    updateMaskStat(payload);
+    clearResult();
+  };
+
+  $("btn-apply").onclick = runApply;
+  $("view-before").onclick = showBefore;
+  $("view-after").onclick = showAfter;
+  $("btn-fit").onclick = fitToWindow;
+  $("btn-export").onclick = () => { window.location.href = "/api/result"; };
+
+  $("btn-settings").onclick = async () => {
+    const settings = await api("/api/settings");
+    $("api-key").value = settings.providers.openrouter.api_key || "";
+    $("settings").hidden = false;
+  };
+  $("settings-cancel").onclick = () => { $("settings").hidden = true; };
+  $("settings-save").onclick = async () => {
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: $("api-key").value }),
+    });
+    $("settings").hidden = true;
+  };
+}
+
+function setTool(next) {
+  tool = next;
+  $("tool-add").classList.toggle("on", next === "add");
+  $("tool-sub").classList.toggle("on", next === "subtract");
+}
+
+async function main() {
+  buildStage();
+  bind();
+  stage.on("click tap", () => { if (photoImage && !viewingResult) clickSelect(); });
+  const state = await api("/api/state");
+  await applyState(state);
+}
+
+main();
+</script>
+</body>
+</html>

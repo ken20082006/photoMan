@@ -78,12 +78,27 @@ class TestEngineCannotBreakTheGuarantee:
         np.testing.assert_array_equal(result.image[alpha == 0], base[alpha == 0])
 
     def test_noop_engine_leaves_the_image_untouched(self, monkeypatch) -> None:
+        """引擎不動，而且關掉紋理校正時，結果應該與原圖完全相同。
+
+        ``match_texture=False`` 是必要的：色彩與顆粒校正**會**改動遮罩內
+        的內容（它把生成塊的統計拉向周圍），所以「引擎不動」不等於
+        「結果不動」——那是兩個不同的階段。
+        """
         base = _base()
         monkeypatch.setattr("photoman.edit.get_inpainter", lambda *a, **k: _NoopInpainter())
 
-        result = apply_generative_edit(base, _mask())
+        result = apply_generative_edit(base, _mask(), match_texture=False)
 
         np.testing.assert_array_equal(result.image, base)
+
+    def test_texture_matching_does_change_the_patch(self, monkeypatch) -> None:
+        """反過來確認校正真的有作用——否則上面那個測試可能是假的。"""
+        base = _base()
+        monkeypatch.setattr("photoman.edit.get_inpainter", lambda *a, **k: _NoopInpainter())
+
+        result = apply_generative_edit(base, _mask(), match_texture=True)
+
+        assert not np.array_equal(result.image, base)
 
     def test_base_is_never_mutated(self, monkeypatch) -> None:
         base = _base()

@@ -16,9 +16,16 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-# 膨脹量。約 1–2 個潛空間格（潛空間壓縮是 8 倍），
-# 讓梯度資訊能跨越邊界流動。見 §5.3.3。
-DEFAULT_DILATE_PX = 8
+# 模型的洞在**寫入範圍之外**再擴張多少。
+#
+# ⚠️ **這不是一個小數字，而且理由是實測出來的**（2026-09-18）：
+# 物件在遮罩邊界之外還有柔邊、反鋸齒與陰影。若模型的洞剛好貼著物件，
+# 它會看到那些殘留的暗色並**往洞裡延伸**——實測 LaMa 把骰子周圍的洞
+# 填成亮度 77，而周圍的布是 114。
+#
+# 這也解釋了一個反直覺的現象：**精確的遮罩不是正確的輸入。**
+# 用點擊分割取到的遮罩貼得極緊，反而比手繪的粗略橢圓效果差。
+DEFAULT_DILATE_PX = 16
 
 # 混合羽化。**下限是 8 像素**——小於潛空間壓縮倍數的羽化對模型等於不存在。
 # 有用的範圍是 16–32 像素。注意這個羽化是我們自己套用的，
@@ -123,14 +130,24 @@ def prepare_masks(
 ) -> tuple[np.ndarray, np.ndarray]:
     """由使用者的選取一次產出兩個遮罩。
 
-    回傳 ``(denoise_mask, blend_alpha)``。``M_denoise`` 以 ``M_blend``
-    為基礎再加上一點膨脹——模型的遮罩要比混合範圍稍大，
-    這樣模型的生成內容才有空間去覆蓋到羽化帶的整個寬度。
+    回傳 ``(denoise_mask, blend_alpha)``。兩層膨脹，各有各的理由：
+
+    ```
+    物件 →[+羽化半径]→ 寫入範圍 →[+dilate_px]→ 模型的洞
+    ```
+
+    **第一層膨脹量等於羽化半徑**，這樣 alpha 才會在使用者圈選的邊界上
+    剛好到達 1.0。少於羽化半徑的話，羽化帶會橫跨物件的外緣——
+    那一圈只被部分替換，原物件的深色邊緣會透出來，形成鬼影。
+
+    **第二層是給模型的額外邊距**，讓它看不到物件的柔邊與陰影
+    （見 ``DEFAULT_DILATE_PX`` 的說明）。
     """
     prepared = fill_holes(mask)
     prepared = remove_specks(prepared, 64)
 
-    blend_base = dilate(prepared, max(0, dilate_px // 2))
-    denoise = dilate(prepared, dilate_px)
+    # 關鍵：膨脹量等於羽化半徑，令 alpha 在物件邊界上剛好到 1.0。
+    blend_base = dilate(prepared, feather_px)
+    denoise = dilate(blend_base, dilate_px)
 
     return denoise, make_blend_alpha(blend_base, feather_px=feather_px)

@@ -21,6 +21,7 @@ import numpy as np
 from photoman.composite import CropBox, composite_patch_into_bytes, plan_crop, ring_delta
 from photoman.inpaint import get_inpainter
 from photoman.mask import DEFAULT_DILATE_PX, DEFAULT_FEATHER_PX, prepare_masks
+from photoman.match import match_colour, match_grain
 from photoman.store import mask_digest
 
 # 校驗環的參考門檻（見 §5.4）。
@@ -78,6 +79,7 @@ def apply_generative_edit(
     margin_ratio: float = 0.35,
     min_margin_px: int = 64,
     checksum_inset_px: int = 0,
+    match_texture: bool = True,
     **engine_options,
 ) -> EditResult:
     """對 ``base`` 套用一次局部生成編輯。
@@ -107,8 +109,16 @@ def apply_generative_edit(
     engine = get_inpainter(method, **engine_options)
     patch = engine.inpaint(base_crop, denoise_crop)
 
-    # 校驗環必須在合成之前量度——偏離過大就不應該採用這張結果（§5.2）。
+    # 校驗環必須在合成之前量度——而且要在色彩與顆粒校正之前，
+    # 因為它量度的是**模型的行為**，不是我們加工之後的結果（§5.2）。
     delta = ring_delta(base_crop, patch, denoise, crop, inset_px=checksum_inset_px)
+
+    if match_texture:
+        # 第 9、10 步：把生成塊融入周圍。**這是令填補消失的關鍵。**
+        # 少了這兩步，任何引擎——本地或 API——都會留下一個
+        # 與遮罩同形狀的平滑色塊。
+        patch = match_colour(patch, base_crop, denoise_crop)
+        patch = match_grain(patch, base_crop, denoise_crop)
 
     image = composite_patch_into_bytes(base, patch, crop, alpha)
 

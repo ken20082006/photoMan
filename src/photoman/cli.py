@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import sys
 
 import typer
@@ -39,6 +40,52 @@ def ui(
     from photoman.web.server import run
 
     run(port=port, open_browser=not no_browser)
+
+
+@app.command()
+def shortcut() -> None:
+    """在桌面建立捷徑。
+
+    **捷徑不進版本庫**：它內含絕對路徑，資料夾一移動就失效。
+    由這個指令重建。
+
+    ⚠️ 這裡刻意用 PowerShell 的**行內** ``-Command``，而不是執行一個
+    ``.ps1`` 檔案。行內指令不受執行原則管轄（那一項管的是指令碼檔案），
+    所以不需要 ``-ExecutionPolicy Bypass``——那等於為了建立一個捷徑
+    而關掉一個安全控制，代價與目的不相稱。
+    """
+    if sys.platform != "win32":
+        console.print("[red]建立捷徑只支援 Windows。[/red]")
+        raise typer.Exit(code=1)
+
+    from photoman.paths import PROJECT_ROOT
+
+    launcher = PROJECT_ROOT / "photoMan.bat"
+    if not launcher.exists():
+        console.print(f"[red]找不到 {launcher}[/red]")
+        raise typer.Exit(code=1)
+
+    script = (
+        "$d = [Environment]::GetFolderPath('Desktop'); "
+        '$s = (New-Object -ComObject WScript.Shell).CreateShortcut("$d\\photoMan.lnk"); '
+        f"$s.TargetPath = '{launcher}'; "
+        f"$s.WorkingDirectory = '{PROJECT_ROOT}'; "
+        "$s.Description = 'photoMan - local photo editing'; "
+        '$s.IconLocation = "$env:SystemRoot\\System32\\shell32.dll,325"; '
+        "$s.Save()"
+    )
+
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        console.print(f"[red]建立捷徑失敗：[/red]\n{completed.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+    console.print("[green]已在桌面建立 photoMan 捷徑。[/green]")
 
 
 @app.command()

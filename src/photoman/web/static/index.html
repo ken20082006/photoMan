@@ -24,7 +24,9 @@
   header h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .5px; }
   header .spacer { flex: 1; }
   main { flex: 1; display: flex; min-height: 0; }
-  #stage-wrap { flex: 1; position: relative; overflow: hidden; background: #14161a; }
+  /* stage-area 負責版面；stage-wrap 是 Konva 專用的容器，鋪滿上層。 */
+  #stage-area { flex: 1; position: relative; overflow: hidden; background: #14161a; }
+  #stage-wrap { position: absolute; inset: 0; }
   aside {
     width: 330px; background: var(--panel); border-left: 1px solid var(--line);
     padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
@@ -57,10 +59,23 @@
   }
   .banner.err { background: #3a1f1d; border-color: #6b2b26; color: #f0a8a2; }
   #drop {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
+    position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 14px; text-align: center;
     color: var(--dim); padding: 40px;
   }
+  /* label 要看起來與 button 一樣 */
+  label.primary {
+    display: inline-block; padding: 11px 22px; border-radius: 8px; cursor: pointer;
+    background: var(--accent); border: 1px solid var(--accent); color: #06203f;
+    font-weight: 600; width: auto;
+  }
+  label.primary:hover { background: #63b0ff; }
+  /* ★ 一定要有這一條。
+     `#drop` 的 `display: flex` 是 id 選擇器，優先度高過瀏覽器為
+     `[hidden]` 預設的 `display: none`——少了這一條，設定 hidden
+     完全沒有效果，那層會一直蓋在畫布上（z-index 10），
+     使用者選完照片之後甚麼都看不到。 */
+  #drop[hidden] { display: none; }
   #drop.hot { background: #1e2a38; color: var(--text); }
   #drop h2 { color: var(--text); font-size: 20px; margin: 0; font-weight: 600; }
   #drop p { margin: 0; max-width: 420px; }
@@ -103,11 +118,19 @@
 </header>
 
 <main>
-  <div id="stage-wrap">
+  <!-- ★ stage-wrap 由 Konva 擁有，裡面**不可以**放其他東西。
+       Konva 建立 Stage 時會清空容器的子元素，放在裡面的東西會消失，
+       之後 getElementById 回傳 null。（這是實測踩到的：開啟圖片的
+       按鈕「按了沒反應」，因為整個 #drop 被 Konva 刪掉了。）
+       所以外層另有一個 stage-area 負責版面，覆蓋層都放在那一層。 -->
+  <div id="stage-area">
+    <div id="stage-wrap"></div>
     <div id="drop">
       <h2>把照片拖進來</h2>
       <p>或者按下面的按鈕選一張。照片只會留在這部電腦，不會上傳到任何地方。</p>
-      <button class="primary" id="btn-pick" style="text-align:center">選擇照片</button>
+      <!-- 用 label 而不是 button + JS：這是 HTML 原生的檔案選擇觸發方式，
+           不會因為任何腳本錯誤而失效。 -->
+      <label for="file-input" class="primary" id="btn-pick">選擇照片</label>
     </div>
     <div class="busy" id="busy" hidden><div class="spin"></div><div id="busy-text">處理中…</div></div>
   </div>
@@ -225,7 +248,7 @@ function buildStage() {
 
 function fitToWindow() {
   if (!photoImage) return;
-  const wrap = $("stage-wrap");
+  const wrap = $("stage-area");
   stage.size({ width: wrap.clientWidth, height: wrap.clientHeight });
   const scale = Math.min(
     wrap.clientWidth / previewImageURL_width(),
@@ -409,13 +432,14 @@ async function showBefore() {
 // ── 事件綁定 ────────────────────────────────────────────────────
 
 function bind() {
-  $("btn-pick").onclick = $("btn-open").onclick = () => $("file-input").click();
+  // 選擇照片用原生 label（見 HTML），這裡只綁 header 的按鈕。
+  $("btn-open").onclick = () => $("file-input").click();
   $("file-input").onchange = (event) => {
     if (event.target.files[0]) openFile(event.target.files[0]);
     event.target.value = "";
   };
 
-  const wrap = $("stage-wrap");
+  const wrap = $("stage-area");
   wrap.addEventListener("dragover", (event) => { event.preventDefault(); $("drop").classList.add("hot"); });
   wrap.addEventListener("dragleave", () => $("drop").classList.remove("hot"));
   wrap.addEventListener("drop", (event) => {
@@ -463,11 +487,26 @@ function setTool(next) {
 }
 
 async function main() {
-  buildStage();
+  // ★ 先綁事件，再建立畫布。
+  //
+  // 這個順序是刻意的：若 Konva 載入失敗，buildStage() 會拋錯——
+  // 而如果綁事件排在它後面，所有按鈕都會變成死的，症狀是
+  // 「按了完全沒有反應」，而且沒有任何錯誤訊息。先綁就沒有這個問題。
   bind();
-  stage.on("click tap", () => { if (photoImage && !viewingResult) clickSelect(); });
-  const state = await api("/api/state");
-  await applyState(state);
+
+  try {
+    buildStage();
+    stage.on("click tap", () => { if (photoImage && !viewingResult) clickSelect(); });
+  } catch (error) {
+    showError(`畫布建立失敗：${error.message}。請重新載入頁面。`);
+    return;
+  }
+
+  try {
+    await applyState(await api("/api/state"));
+  } catch (error) {
+    showError(`無法連接伺服器：${error.message}`);
+  }
 }
 
 main();

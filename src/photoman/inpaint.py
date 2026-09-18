@@ -131,6 +131,93 @@ class LamaInpainter:
         return cv2.resize(filled, (width, height), interpolation=cv2.INTER_LANCZOS4)
 
 
+class ApiInpainter:
+    """經由雲端模型做**語意編輯**——不只是移除，而是聽指令改變內容。
+
+    「移除這個人」「把她的動作改成揮手」「在這裡加一隻小狗」——
+    這一類工作在本地 inpainting 做不到（LaMa 只會由邊界往內填，
+    它沒有「理解」的能力），必須交給生成模型。
+
+    ⚠️ **API 沒有 mask 參數**，所以做不到真正的遮罩式 inpainting。
+    這裡的做法是把選取範圍**畫在第二張參考圖上**，並在指令裡說明
+    ——不然模型不知道「加一隻小狗」是要加在哪裡。
+
+    安全性由合成器保證：模型就算把整張裁切圖都改爛，
+    合成器也只會取遮罩內的像素，遮罩外仍然逐位元組不變。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        resolution: str | None = None,
+        client=None,
+        show_selection: bool = True,
+    ) -> None:
+        self.model = model
+        self.prompt = prompt
+        self.resolution = resolution
+        self.show_selection = show_selection
+        self._client = client
+        self.last_cost: float | None = None
+        self.last_seconds: float | None = None
+
+    @property
+    def name(self) -> str:
+        return f"api:{self.model}"
+
+    def _client_or_default(self):
+        if self._client is None:
+            from photoman.providers import client_from_config
+
+            self._client = client_from_config()
+        return self._client
+
+    def inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        from photoman.providers import ProviderError
+
+        binary = np.asarray(mask) > 0
+        if not binary.any():
+            return image.copy()
+
+        references = [image]
+        instruction = self.prompt.strip()
+        if self.show_selection:
+            references.append(_highlight(image, binary))
+            instruction = (
+                f"{instruction}\n\n"
+                "The second image marks the area to change with a red tint. "
+                "Only change what is inside the marked area. "
+                "Leave everything outside the marked area exactly as it is."
+            )
+
+        try:
+            response = self._client_or_default().edit(
+                image,
+                instruction,
+                model=self.model,
+                resolution=self.resolution,
+            )
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 統一轉成看得懂的訊息
+            raise ProviderError(f"呼叫 {self.model} 失敗：{exc}") from exc
+
+        self.last_cost = response.cost_usd
+        self.last_seconds = response.seconds
+        return response.image
+
+
+def _highlight(image: np.ndarray, mask: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+    """把選取範圍畫成紅色半透明——用來告訴模型要改哪裡。"""
+    tinted = image.astype(np.float32)
+    red = np.zeros_like(tinted)
+    red[..., 0] = 255.0
+    tinted[mask] = tinted[mask] * (1.0 - alpha) + red[mask] * alpha
+    return np.clip(tinted, 0, 255).astype(np.uint8)
+
+
 def get_inpainter(method: str, **options) -> Inpainter:
     """由名稱取得引擎。
 
@@ -147,7 +234,13 @@ def get_inpainter(method: str, **options) -> Inpainter:
 
         options.setdefault("model_path", lama_model_path())
         return LamaInpainter(**options)
+    if family == "api":
+        # 命名是 api:<model-id>，例如 api:bytedance-seed/seedream-5-0-lite
+        _, _, model = method.partition(":")
+        if not model:
+            raise ValueError("api: 後面要接模型代號，例如 api:bytedance-seed/seedream-5-0-lite")
+        return ApiInpainter(model=model, **options)
     raise ValueError(
         f"未知的 inpainting 方法：{method}\n"
-        "目前支援 telea、ns、lama。API 模型尚未接入（見 docs/PROGRESS.md）。"
+        "支援 telea、ns、lama，以及 api:<model-id>。"
     )

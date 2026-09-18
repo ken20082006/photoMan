@@ -89,10 +89,12 @@
     padding: 22px; width: 440px; display: flex; flex-direction: column; gap: 14px;
   }
   .modal h2 { margin: 0; font-size: 16px; }
-  input[type=password], input[type=text] {
+  input[type=password], input[type=text], textarea, select {
     width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
     background: #1c1f24; color: var(--text); font: inherit;
   }
+  textarea { resize: vertical; line-height: 1.5; }
+  select { cursor: pointer; }
   label { font-size: 13px; color: var(--dim); }
   .busy {
     position: absolute; inset: 0; background: rgba(20,22,26,.72);
@@ -151,9 +153,17 @@
     </div>
 
     <div class="group">
-      <h2>第二步：移除</h2>
+      <h2>第二步：要做甚麼</h2>
+      <p class="hint">
+        留空就只是移除選中的東西（本機執行，不需要 API key）。
+        或者描述你想做甚麼——「把她的動作改成揮手」「在這裡加一隻小狗」
+        ——那就會交給雲端模型。
+      </p>
+      <textarea id="prompt" rows="3"
+        placeholder="留空＝移除選中的東西&#10;或輸入指令，例如：把這件衣服換成紅色"></textarea>
+      <select id="model"><option value="">本機移除（不需要 API key）</option></select>
       <button class="primary" id="btn-apply" disabled>
-        移除選中的東西
+        執行
         <small id="apply-hint">先選取一樣東西</small>
       </button>
     </div>
@@ -335,7 +345,9 @@ function updateMaskStat(payload) {
     ? `已選取 ${pixels.toLocaleString()} 個像素`
     : "未選取任何東西";
   $("btn-apply").disabled = !pixels;
-  $("apply-hint").textContent = pixels ? "會用本機模型填補" : "先選取一樣東西";
+  $("apply-hint").textContent = pixels
+    ? ($("prompt").value.trim() ? "會交給雲端模型" : "會用本機模型移除")
+    : "先選取一樣東西";
 }
 
 // ── 流程 ────────────────────────────────────────────────────────
@@ -388,21 +400,59 @@ function clearResult() {
   $("view-before").classList.remove("on");
 }
 
+async function loadModels() {
+  let payload;
+  try {
+    payload = await api("/api/models");
+  } catch (error) {
+    return;   // 拿不到清單不影響本機功能
+  }
+  const select = $("model");
+  for (const model of payload.models) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    const price = model.price != null ? `　$${model.price.toFixed(3)} 一張` : "";
+    const resolution = model.resolution && model.resolution !== "—"
+      ? `　${model.resolution}` : "";
+    option.textContent = `${model.name}${price}${resolution}`;
+    select.appendChild(option);
+  }
+  if (payload.note) {
+    const option = document.createElement("option");
+    option.disabled = true;
+    option.textContent = "（填入 API key 之後可使用雲端模型）";
+    select.appendChild(option);
+  }
+}
+
 async function runApply() {
-  showBusy("移除中…（本機模型，約 10–30 秒）");
+  const prompt = $("prompt").value.trim();
+  const model = $("model").value;
+
+  if (prompt && !model) {
+    showError("要下指令的話，請在上面選一個雲端模型。留空就只是移除。");
+    return;
+  }
+
+  showBusy(
+    model
+      ? "交給雲端模型…（可能要 10–60 秒）"
+      : "移除中…（本機模型，約 10–30 秒）"
+  );
+  showError("");
   try {
     const started = performance.now();
     const payload = await api("/api/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method: "lama" }),
+      body: JSON.stringify({ prompt, model: model || null }),
     });
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
     resultImageURL = payload.image;
     $("btn-export").disabled = false;
-    const checksum = payload.checksum;
+    const how = model ? "雲端模型" : "本機模型";
     $("result-stat").textContent =
-      `完成，用時 ${seconds} 秒。選取範圍以外完全沒有改動。`;
+      `完成（${how}，用時 ${seconds} 秒）。選取範圍以外完全沒有改動。`;
     await showAfter();
   } catch (error) {
     showError(error.message);
@@ -501,6 +551,8 @@ async function main() {
     showError(`畫布建立失敗：${error.message}。請重新載入頁面。`);
     return;
   }
+
+  loadModels();
 
   try {
     await applyState(await api("/api/state"));

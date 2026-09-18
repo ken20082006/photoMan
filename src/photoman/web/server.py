@@ -322,31 +322,79 @@ def _mask_payload() -> dict:
 
 
 class ApplyRequest(BaseModel):
+    # 留空＝移除選中的東西（本機 LaMa）。
+    # 有填＝交給雲端模型照指令改，例如「把她的動作改成揮手」「加一隻小狗」。
+    prompt: str = ""
+    model: str | None = None
+    resolution: str | None = None
     method: str = "lama"
     dilate_px: int = 16
     feather_px: int = 12
 
 
+@app.get("/api/models")
+def list_models() -> dict:
+    """可用的雲端模型，按價格排序。沒有 API key 時回傳空清單而不是報錯——
+    本機功能不需要 key，不應該因為沒有 key 就不能用介面。"""
+    from photoman.providers import ProviderError, client_from_config
+
+    try:
+        models = client_from_config().models()
+    except ProviderError as exc:
+        return {"models": [], "note": str(exc)}
+
+    return {
+        "models": [
+            {
+                "id": model.id,
+                "name": model.name,
+                "price": model.price_per_image,
+                "resolution": model.max_resolution,
+            }
+            for model in models
+        ],
+        "note": None,
+    }
+
+
 @app.post("/api/apply")
 def apply(request: ApplyRequest) -> dict:
     SESSION.require_image()
+    from photoman.providers import ProviderError
+
     with SESSION.lock:
         if not SESSION.mask.any():
             raise HTTPException(status_code=400, detail="還沒有選取任何東西")
+
+        wants_instruction = bool(request.prompt.strip())
+        if request.model:
+            method = f"api:{request.model}"
+        elif wants_instruction:
+            raise HTTPException(
+                status_code=400, detail="要下指令的話需要先選一個雲端模型。"
+            )
+        else:
+            method = "lama"
+
+        options: dict = {}
+        if method.startswith("api:"):
+            options = {"prompt": request.prompt, "resolution": request.resolution}
+
         try:
             result = apply_generative_edit(
                 SESSION.base,
                 SESSION.mask,
-                method=request.method,
+                method=method,
                 dilate_px=request.dilate_px,
                 feather_px=request.feather_px,
+                **options,
             )
-        except (ImportError, FileNotFoundError) as exc:
+        except (ImportError, FileNotFoundError, ProviderError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         SESSION.result = result.image
         SESSION.checksum = float(result.checksum)
-        SESSION.method = request.method
+        SESSION.method = method
 
         preview = np.asarray(
             Image.fromarray(SESSION.result).resize(
@@ -356,7 +404,7 @@ def apply(request: ApplyRequest) -> dict:
         return {
             "image": _png_data_url(preview),
             "checksum": SESSION.checksum,
-            "seconds": None,
+            "method": method,
         }
 
 

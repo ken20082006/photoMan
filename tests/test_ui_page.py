@@ -126,6 +126,74 @@ class TestBindOrder:
         assert code.index("bind()") < code.index("buildStage()")
 
 
+class TestManualSelectionTools:
+    """★ 使用者自己圈選——這一組守著「我的手畫的就是遮罩」。"""
+
+    def test_the_manual_tools_are_in_the_markup(self, html: str) -> None:
+        for element_id in ("tool-brush", "tool-box", "tool-auto", "mode-add", "mode-sub"):
+            assert re.search(rf'id="{element_id}"', html), f"缺少 {element_id}"
+
+    def test_the_brush_size_slider_exists(self, html: str) -> None:
+        assert re.search(r'<input[^>]+type="range"[^>]+id="brush-size"', html)
+
+    def test_a_stroke_is_sent_once_on_pointer_up(self, js: str) -> None:
+        """筆畫在瀏覽器上畫，放手才送一次。
+
+        反過來（每個 mousemove 都送）會令塗抹嚴重延遲——而延遲在
+        塗抹這種直接操作的動作上是不能接受的，使用者會以為滑鼠壞了。
+        """
+        assert 'stage.on("mousedown touchstart", onPointerDown)' in js
+        assert 'stage.on("mousemove touchmove", extendStroke)' in js
+        assert 'stage.on("mouseup touchend", endStroke)' in js
+        assert "/api/mask/stroke" in js and "/api/mask/rect" in js
+
+    def test_releasing_outside_the_canvas_ends_the_stroke(self, js: str) -> None:
+        """在照片外面放手也要收筆，否則那一筆會卡住，之後滑鼠一動
+        就會由舊的起點長出一條長線。"""
+        assert 'window.addEventListener("mouseup", endStroke)' in js
+
+    def test_automatic_selection_only_runs_on_a_click(self, js: str) -> None:
+        """筆刷與方框是拖曳的，拖曳結束的 click 不可以又叫一次 SAM。"""
+        assert 'if (tool === "auto") clickSelect()' in js
+
+    def test_strokes_are_sent_one_at_a_time(self, js: str) -> None:
+        """併發送出的話，先回來的會蓋掉後回的，畫面上看到選取「彈回去」。"""
+        assert "maskQueue = maskQueue.then" in js
+
+
+class TestHistoryControls:
+    """多步編輯的介面——每一次執行都直接生效，退路是復原。"""
+
+    def test_the_undo_and_redo_buttons_exist(self, html: str) -> None:
+        for element_id in ("btn-undo", "btn-redo", "history-stat", "save-banner"):
+            assert re.search(rf'id="{element_id}"', html), f"缺少 {element_id}"
+
+    def test_they_start_disabled(self, html: str) -> None:
+        assert re.search(r'id="btn-undo"[^>]*disabled', html)
+        assert re.search(r'id="btn-redo"[^>]*disabled', html)
+
+    def test_all_of_them_are_wired_up(self, js: str) -> None:
+        assert '$("btn-undo").onclick' in js
+        assert '$("btn-redo").onclick' in js
+        assert "/api/undo" in js and "/api/redo" in js
+
+    def test_the_buttons_follow_the_server_state(self, js: str) -> None:
+        """誰能按全部由 /api/state 決定，不散在各處各自判斷。
+
+        散著判斷很容易出現「按鈕看起來能用、按下去報錯」。
+        """
+        assert "function renderHistory()" in js
+        assert "snapshot.can_undo" in js and "snapshot.can_redo" in js
+
+    def test_the_mask_overlay_is_kept_in_both_views(self, js: str) -> None:
+        """看成品時也要看到遮罩——多步編輯是接著圈下一處，
+        不應該強迫使用者先切回原圖。
+        """
+        view = re.search(r"async function setView\(next\) \{(.*?)\n\}", js, re.S).group(1)
+
+        assert "setOverlay(maskOverlayURL)" in view
+
+
 class TestOfflinePromise:
     def test_no_external_resources(self, html: str) -> None:
         """完全離線可用——沒有網絡時這個工具仍然要能用。"""

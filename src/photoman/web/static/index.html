@@ -29,15 +29,15 @@
   #stage-wrap { position: absolute; inset: 0; }
   aside {
     width: 330px; background: var(--panel); border-left: 1px solid var(--line);
-    padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 13px;
   }
-  .group { display: flex; flex-direction: column; gap: 9px; }
+  .group { display: flex; flex-direction: column; gap: 8px; }
   .group h2 {
     font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
     letter-spacing: 1.2px; text-transform: none;
   }
   button {
-    padding: 11px 14px; border-radius: 8px; border: 1px solid var(--line);
+    padding: 9px 13px; border-radius: 8px; border: 1px solid var(--line);
     background: #30363e; color: var(--text); font: inherit; cursor: pointer;
     text-align: left; transition: background .12s, border-color .12s;
   }
@@ -96,6 +96,14 @@
   textarea { resize: vertical; line-height: 1.5; }
   select { cursor: pointer; }
   label { font-size: 13px; color: var(--dim); }
+  label b { color: var(--text); font-weight: 600; }
+  .group.slim { gap: 4px; }
+  /* 筆刷粗細只在筆刷工具下有意義。用淡化而不是隱藏：那一行消失會令
+     下面所有按鈕跳位，使用者在切換工具時會按錯。 */
+  .group.dim { opacity: .35; pointer-events: none; }
+  input[type=range] {
+    width: 100%; accent-color: var(--accent); cursor: pointer; margin: 0;
+  }
   .busy {
     position: absolute; inset: 0; background: rgba(20,22,26,.72);
     display: flex; align-items: center; justify-content: center; z-index: 20;
@@ -139,27 +147,39 @@
 
   <aside>
     <div class="banner" id="models-banner" hidden></div>
+    <div class="banner" id="save-banner" hidden></div>
     <div class="banner err" id="error-banner" hidden></div>
 
     <div class="group">
-      <h2>第一步：指一下要改的東西</h2>
-      <p class="hint">在照片上按一下那件東西，它就會被選中。</p>
+      <h2>第一步：圈出要改的地方</h2>
+      <p class="hint" id="tool-hint">用筆刷在照片上拖曳，塗出想改的範圍。</p>
       <div class="row">
-        <button id="tool-add" class="on">選取<small>按一下物件</small></button>
-        <button id="tool-sub">排除<small>按一下多選的部分</small></button>
+        <button id="tool-brush" class="on">筆刷<small>拖曳塗抹</small></button>
+        <button id="tool-box">方框<small>拉一個框</small></button>
+        <button id="tool-auto">自動<small>點選物件</small></button>
+      </div>
+      <div class="group slim" id="brush-row">
+        <label for="brush-size">筆刷粗細　<b id="brush-size-value">40</b></label>
+        <input type="range" id="brush-size" min="6" max="240" step="2" value="40">
+      </div>
+      <div class="row">
+        <button id="mode-add" class="on">加選</button>
+        <button id="mode-sub">擦掉</button>
       </div>
       <div class="stat" id="mask-stat">未選取任何東西</div>
       <button id="btn-clear">清除選取</button>
+      <p class="hint">
+        圈選的範圍就是會改的範圍，不經 AI 判斷。執行時會再向外擴張約 30 像素。
+      </p>
     </div>
 
     <div class="group">
       <h2>第二步：要做甚麼</h2>
       <p class="hint">
-        留空就只是移除選中的東西（本機執行，不需要 API key）。
-        或者描述你想做甚麼——「把她的動作改成揮手」「在這裡加一隻小狗」
-        ——那就會交給雲端模型。
+        留空＝移除選中的東西（本機，不需要 API key）。或者描述你想做甚麼，
+        那就交給雲端模型。
       </p>
-      <textarea id="prompt" rows="3"
+      <textarea id="prompt" rows="2"
         placeholder="留空＝移除選中的東西&#10;或輸入指令，例如：把這件衣服換成紅色"></textarea>
       <select id="model"><option value="">本機移除（不需要 API key）</option></select>
       <button class="primary" id="btn-apply" disabled>
@@ -172,10 +192,18 @@
       <h2>第三步：看結果</h2>
       <div class="row">
         <button id="view-before">看原圖</button>
-        <button id="view-after">看成品</button>
+        <button id="view-after" class="on">看成品</button>
       </div>
       <div class="stat" id="result-stat"></div>
+      <div class="stat" id="history-stat">還沒有修改</div>
+      <div class="row">
+        <button id="btn-undo" disabled>復原<small>退回上一步</small></button>
+        <button id="btn-redo" disabled>重做<small>再做一次</small></button>
+      </div>
       <button id="btn-export" disabled>匯出成品（原解析度）</button>
+      <p class="hint">
+        執行直接生效，不滿意按「復原」——它會把當初圈的範圍放回來。
+      </p>
     </div>
 
     <div class="group">
@@ -207,10 +235,19 @@
 "use strict";
 
 const IMG = { x: 0, y: 0 };
-let stage, imageLayer, maskLayer, maskImage, photoImage;
-let previewImageURL = null, maskOverlayURL = null, resultImageURL = null;
-let viewingResult = false;
-let tool = "add";
+let stage, imageLayer, maskLayer, drawLayer, maskImage, photoImage;
+let maskOverlayURL = null;
+// 兩張預覽各自快取。伺服器每次都要重新編碼一張 PNG（42 MP 的縮圖
+// 也要幾百 KB），切換前後對照不應該每次都付這個成本。
+let sourceImageURL = null, workingImageURL = null;
+let snapshot = null;       // 最後一次 /api/state——介面的唯一真相來源
+let view = "after";        // after = 成品，before = 原圖
+let tool = "brush";        // brush | box | auto
+let mode = "add";          // add | subtract——筆刷與方框共用
+let brushSize = 40;
+let stroke = null;         // 正在畫的那一筆
+let strokeNodes = [];      // 已放手但伺服器尚未回覆的筆畫
+let maskQueue = Promise.resolve();
 
 const $ = (id) => document.getElementById(id);
 
@@ -236,8 +273,10 @@ function buildStage() {
   stage = new Konva.Stage({ container: "stage-wrap", width: 100, height: 100 });
   imageLayer = new Konva.Layer();
   maskLayer = new Konva.Layer();
+  drawLayer = new Konva.Layer();   // 正在畫的那一筆，畫在遮罩之上
   stage.add(imageLayer);
   stage.add(maskLayer);
+  stage.add(drawLayer);
 
   stage.on("wheel", (event) => {
     event.evt.preventDefault();
@@ -320,6 +359,7 @@ function pointerToImage() {
 }
 
 async function clickSelect() {
+  if (!photoImage) return;
   const position = pointerToImage();
   if (!position) return;
   showBusy("選取中…");
@@ -327,16 +367,168 @@ async function clickSelect() {
     const payload = await api("/api/select", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x: position.x, y: position.y, mode: tool }),
+      body: JSON.stringify({ x: position.x, y: position.y, mode }),
     });
-    await setOverlay(payload.overlay);
-    updateMaskStat(payload);
-    clearResult();
+    await rememberOverlay(payload);
   } catch (error) {
     showError(error.message);
   } finally {
     hideBusy();
   }
+}
+
+// ── 手動圈選（筆刷、方框）────────────────────────────────────────
+//
+// **使用者畫的範圍就是遮罩本身**，中間不經過任何模型。
+//
+// 那一筆只在瀏覽器上畫（一條 Konva 圖形），放手才送給伺服器換算成
+// 原圖座標的遮罩。這樣塗抹本身是零延遲的——跟不上的話，使用者會
+// 以為滑鼠壞了——而伺服器只需要處理完成的筆畫。
+//
+// 每一筆之間**依序**送出（見 queueMask）。併發送出的話，回來的順序
+// 不保證，較早那一筆的疊圖會蓋掉較晚的，畫面上就看到選取「彈回去」。
+
+function clampToImage(position) {
+  // 筆刷要能沿著照片邊緣塗，所以超出邊界時貼齊，而不是整點丟棄。
+  return {
+    x: Math.max(0, Math.min(previewSize.width - 1, position.x)),
+    y: Math.max(0, Math.min(previewSize.height - 1, position.y)),
+  };
+}
+
+function beginStroke() {
+  if (!photoImage) return;
+  const position = stage.getRelativePointerPosition();
+  if (!position) return;
+  const start = clampToImage(position);
+
+  const node = tool === "brush"
+    ? new Konva.Line({
+        points: [start.x, start.y],
+        stroke: "rgba(255,70,70,.55)", strokeWidth: brushSize,
+        lineCap: "round", lineJoin: "round", listening: false,
+      })
+    : new Konva.Rect({
+        x: start.x, y: start.y, width: 0, height: 0,
+        fill: "rgba(255,70,70,.30)", stroke: "rgba(255,120,120,.9)",
+        strokeWidth: 1, listening: false,
+      });
+
+  drawLayer.add(node);
+  // 粗細要**跟著這一筆記下來**：筆畫是排隊送出的，若在等待期間
+  // 使用者拉了粗細，讀當下的值就會把先前那一筆重畫成新的粗細。
+  stroke = { tool, mode, size: brushSize, start, points: [start], node };
+  drawLayer.batchDraw();
+}
+
+function extendStroke() {
+  if (!stroke) return;
+  const position = stage.getRelativePointerPosition();
+  if (!position) return;
+  const point = clampToImage(position);
+
+  if (stroke.tool === "brush") {
+    // 同一個像素上重複觸發不必記——那些點對筆畫沒有貢獻，
+    // 只會令送出去的圖形變大。
+    const last = stroke.points[stroke.points.length - 1];
+    if (Math.hypot(point.x - last.x, point.y - last.y) < 1) return;
+    stroke.points.push(point);
+    stroke.node.points(stroke.points.flatMap((p) => [p.x, p.y]));
+  } else {
+    stroke.points = [stroke.start, point];
+    stroke.node.setAttrs({
+      x: Math.min(stroke.start.x, point.x),
+      y: Math.min(stroke.start.y, point.y),
+      width: Math.abs(point.x - stroke.start.x),
+      height: Math.abs(point.y - stroke.start.y),
+    });
+  }
+  drawLayer.batchDraw();
+}
+
+function endStroke() {
+  if (!stroke) return;
+  const finished = stroke;
+  stroke = null;
+
+  if (finished.tool === "box") {
+    const [a, b] = finished.points;
+    // 只是點一下而沒有拉——當作沒發生，不要送出一個空的框。
+    if (Math.abs(a.x - b.x) < 4 || Math.abs(a.y - b.y) < 4) {
+      finished.node.destroy();
+      drawLayer.batchDraw();
+      return;
+    }
+  }
+
+  // 圖形要留到伺服器回覆為止，否則那一筆會先消失再重新出現——
+  // 在 42 MP 的圖上那中間有一兩秒，看起來像被吃掉了。
+  strokeNodes.push(finished.node);
+  queueMask(() => commitStroke(finished));
+}
+
+function strokeToDataURL(points, size) {
+  // 白線黑底，交給伺服器時就只有「塗到 / 沒塗到」兩種。
+  const canvas = document.createElement("canvas");
+  canvas.width = previewSize.width;
+  canvas.height = previewSize.height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#fff";
+  context.strokeStyle = "#fff";
+  context.lineWidth = size;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  if (points.length === 1) {
+    // 單點：畫一個圓。只按一下不拖也應該留下一個點。
+    context.beginPath();
+    context.arc(points[0].x, points[0].y, size / 2, 0, Math.PI * 2);
+    context.fill();
+  } else {
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    context.stroke();
+  }
+  return canvas.toDataURL("image/png");
+}
+
+function queueMask(work) {
+  maskQueue = maskQueue.then(work, work);
+  return maskQueue;
+}
+
+async function commitStroke(finished) {
+  const [a, b] = finished.points;
+  const body = finished.tool === "box"
+    ? { x0: a.x, y0: a.y, x1: b.x, y1: b.y, mode: finished.mode }
+    : { image: strokeToDataURL(finished.points, finished.size), mode: finished.mode };
+  const path = finished.tool === "box" ? "/api/mask/rect" : "/api/mask/stroke";
+
+  try {
+    const payload = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await rememberOverlay(payload);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    finished.node.destroy();
+    strokeNodes = strokeNodes.filter((node) => node !== finished.node);
+    drawLayer.batchDraw();
+  }
+}
+
+// 收到新的遮罩疊圖。**成品本身沒有變**——不需要清掉任何結果，
+// 只要把疊圖換掉、把數字更新。
+async function rememberOverlay(payload) {
+  maskOverlayURL = payload.overlay;
+  await setOverlay(maskOverlayURL);
+  updateMaskStat(payload);
 }
 
 function updateMaskStat(payload) {
@@ -373,11 +565,20 @@ async function applyState(state) {
     : "";
   if (!state.opened) return;
 
-  const preview = await api("/api/preview");
-  await setPhoto(preview.image, { width: state.preview_width, height: state.preview_height });
+  // 換圖要把上一張的暫存狀態清掉，否則新圖會疊著舊圖的筆畫。
+  stroke = null;
+  strokeNodes = [];
+  sourceImageURL = null;
+  workingImageURL = null;
+  if (drawLayer) drawLayer.destroyChildren();
+
+  snapshot = state;
+  previewSize = { width: state.preview_width, height: state.preview_height };
+  await setView("after");
   await setOverlay(null);
-  clearResult();
+  $("result-stat").textContent = "";
   updateMaskStat({ mask_pixels: 0 });
+  renderHistory();
 
   const banner = $("models-banner");
   const missing = [];
@@ -389,15 +590,39 @@ async function applyState(state) {
   } else {
     banner.hidden = true;
   }
+
+  // 專案掛不上時**一定要說出來**——默默不存檔是這裡唯一不能接受的失敗。
+  const save = $("save-banner");
+  if (state.project_note) {
+    save.textContent = state.project_note;
+    save.hidden = false;
+  } else if (!state.project_saved) {
+    save.textContent = "這次的修改不會被保存。";
+    save.hidden = false;
+  } else {
+    save.hidden = true;
+  }
 }
 
-function clearResult() {
-  resultImageURL = null;
-  viewingResult = false;
-  $("btn-export").disabled = true;
-  $("result-stat").textContent = "";
-  $("view-after").classList.remove("on");
-  $("view-before").classList.remove("on");
+// 介面上「有沒有東西可以看／可以退」全部由這一個函數決定，
+// 不散在各處各自判斷——那樣很容易出現按鈕看起來能用、按下去報錯的情況。
+function renderHistory() {
+  if (!snapshot) return;
+  const count = (snapshot.layers || []).length;
+  $("history-stat").textContent = count
+    ? `已修改 ${count} 處${snapshot.can_redo ? "（有可以重做的步驟）" : ""}`
+    : "還沒有修改";
+  $("btn-undo").disabled = !snapshot.can_undo;
+  $("btn-redo").disabled = !snapshot.can_redo;
+  $("btn-export").disabled = !snapshot.has_result;
+  $("view-before").disabled = false;
+  $("view-after").disabled = !snapshot.opened;
+}
+
+async function refreshState() {
+  snapshot = await api("/api/state");
+  renderHistory();
+  return snapshot;
 }
 
 async function loadModels() {
@@ -448,12 +673,15 @@ async function runApply() {
       body: JSON.stringify({ prompt, model: model || null }),
     });
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
-    resultImageURL = payload.image;
-    $("btn-export").disabled = false;
+    workingImageURL = null;   // 成品變了，快取要失效
+    await refreshState();
     const how = model ? "雲端模型" : "本機模型";
     $("result-stat").textContent =
       `完成（${how}，用時 ${seconds} 秒）。選取範圍以外完全沒有改動。`;
-    await showAfter();
+    await setView("after");
+    await setOverlay(null);   // 遮罩已經清空
+    maskOverlayURL = null;
+    updateMaskStat({ mask_pixels: 0 });
   } catch (error) {
     showError(error.message);
   } finally {
@@ -461,22 +689,52 @@ async function runApply() {
   }
 }
 
-async function showAfter() {
-  if (!resultImageURL) return;
-  viewingResult = true;
-  await setPhoto(resultImageURL, previewSize);
-  $("view-after").classList.add("on");
-  $("view-before").classList.remove("on");
-  if (maskOverlayURL) await setOverlay(null);
+// ── 復原與重做 ──────────────────────────────────────────────────
+//
+// 伺服器是唯一的真相來源：這裡只負責把結果拿回來重畫。
+// 遮罩的處理是刻意不對稱的——復原會把當初圈的範圍放回來
+// （方便改一改再試一次），重做則清空（與當初執行時一致）。
+
+async function runUndoRedo(path, busyText) {
+  showError("");
+  showBusy(busyText);
+  try {
+    const state = await api(path, { method: "POST" });
+    snapshot = state;
+    workingImageURL = null;
+    maskOverlayURL = state.overlay;
+    updateMaskStat(state);
+    renderHistory();
+    $("result-stat").textContent = "";
+    await setView("after");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideBusy();
+  }
 }
 
-async function showBefore() {
-  const preview = await api("/api/preview");
-  viewingResult = false;
-  await setPhoto(preview.image, previewSize);
-  $("view-before").classList.add("on");
-  $("view-after").classList.remove("on");
-  if (maskOverlayURL) await setOverlay(maskOverlayURL);
+// ── 畫面切換 ────────────────────────────────────────────────────
+//
+// 遮罩疊圖**兩個檢視都顯示**。這樣「看成品」的時候也可以直接接著圈下一處，
+// 不必先切回原圖——而多步編輯正是要不斷接著圈。
+
+async function previewURL(kind) {
+  if (kind === "source") {
+    if (!sourceImageURL) sourceImageURL = (await api("/api/preview?source=true")).image;
+    return sourceImageURL;
+  }
+  if (!workingImageURL) workingImageURL = (await api("/api/preview")).image;
+  return workingImageURL;
+}
+
+async function setView(next) {
+  if (!snapshot || !snapshot.opened) return;
+  view = next;
+  $("view-before").classList.toggle("on", next === "before");
+  $("view-after").classList.toggle("on", next === "after");
+  await setPhoto(await previewURL(next === "before" ? "source" : "working"), previewSize);
+  await setOverlay(maskOverlayURL);
 }
 
 // ── 事件綁定 ────────────────────────────────────────────────────
@@ -498,19 +756,31 @@ function bind() {
     if (event.dataTransfer.files[0]) openFile(event.dataTransfer.files[0]);
   });
 
-  $("tool-add").onclick = () => setTool("add");
-  $("tool-sub").onclick = () => setTool("subtract");
+  $("tool-brush").onclick = () => setTool("brush");
+  $("tool-box").onclick = () => setTool("box");
+  $("tool-auto").onclick = () => setTool("auto");
+  $("mode-add").onclick = () => setMode("add");
+  $("mode-sub").onclick = () => setMode("subtract");
+  $("brush-size").oninput = (event) => {
+    brushSize = Number(event.target.value);
+    $("brush-size-value").textContent = String(brushSize);
+  };
+  // 在照片外面放手也要收筆——不然那一筆會卡住，之後滑鼠動一動
+  // 就會從舊的起點繼續長長一條線出來。
+  window.addEventListener("mouseup", endStroke);
+  window.addEventListener("touchend", endStroke);
+
   $("btn-clear").onclick = async () => {
     if (!stage || $("drop").hidden === false) return;
     const payload = await api("/api/clear_mask", { method: "POST" });
-    await setOverlay(payload.overlay);
-    updateMaskStat(payload);
-    clearResult();
+    await rememberOverlay(payload);
   };
 
   $("btn-apply").onclick = runApply;
-  $("view-before").onclick = showBefore;
-  $("view-after").onclick = showAfter;
+  $("view-before").onclick = () => setView("before");
+  $("view-after").onclick = () => setView("after");
+  $("btn-undo").onclick = () => runUndoRedo("/api/undo", "復原中…");
+  $("btn-redo").onclick = () => runUndoRedo("/api/redo", "重做中…");
   $("btn-fit").onclick = fitToWindow;
   $("btn-export").onclick = () => { window.location.href = "/api/result"; };
 
@@ -530,10 +800,33 @@ function bind() {
   };
 }
 
+const TOOL_HINTS = {
+  brush: "用筆刷在照片上拖曳，塗出想改的範圍。",
+  box: "在照片上拉一個矩形，框住想改的地方。",
+  auto: "在物件上按一下，讓 AI 判斷那件東西的範圍。",
+};
+
 function setTool(next) {
   tool = next;
-  $("tool-add").classList.toggle("on", next === "add");
-  $("tool-sub").classList.toggle("on", next === "subtract");
+  $("tool-brush").classList.toggle("on", next === "brush");
+  $("tool-box").classList.toggle("on", next === "box");
+  $("tool-auto").classList.toggle("on", next === "auto");
+  $("brush-row").classList.toggle("dim", next !== "brush");
+  $("tool-hint").textContent = TOOL_HINTS[next];
+}
+
+function setMode(next) {
+  mode = next;
+  $("mode-add").classList.toggle("on", next === "add");
+  $("mode-sub").classList.toggle("on", next === "subtract");
+}
+
+function onPointerDown() {
+  // 兩個檢視都可以畫：遮罩疊圖在「看成品」時也顯示，座標系也一樣大。
+  // 多步編輯就是不斷接著圈下一處，不應該強迫使用者先切回原圖。
+  if (!photoImage || tool === "auto") return;
+  showError("");
+  beginStroke();
 }
 
 async function main() {
@@ -546,7 +839,13 @@ async function main() {
 
   try {
     buildStage();
-    stage.on("click tap", () => { if (photoImage && !viewingResult) clickSelect(); });
+    stage.on("mousedown touchstart", onPointerDown);
+    stage.on("mousemove touchmove", extendStroke);
+    stage.on("mouseup touchend", endStroke);
+    // 「自動」只在按一下的時候作用；筆刷與方框走上面的拖曳事件。
+    stage.on("click tap", () => { if (tool === "auto") clickSelect(); });
+    setTool(tool);
+    setMode(mode);
   } catch (error) {
     showError(`畫布建立失敗：${error.message}。請重新載入頁面。`);
     return;

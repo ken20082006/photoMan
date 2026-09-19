@@ -122,6 +122,23 @@ def make_blend_alpha(
     return alpha
 
 
+def blend_alpha_for(
+    mask: np.ndarray,
+    *,
+    feather_px: int = DEFAULT_FEATHER_PX,
+) -> np.ndarray:
+    """由使用者的選取直接算出合成 alpha——**重播時走的就是這一條**。
+
+    與 :func:`prepare_masks` 的關係：那一個會順便多膨脹一次給模型用，
+    但**那一層膨脹不影響 alpha**（實測：``dilate_px`` 由 8 改成 40，
+    alpha 逐位元相同）。所以重播不需要知道 ``dilate_px``，
+    也不必付出那一次膨脹與它 42 MP 的記憶體。
+
+    兩邊共用這一個實作，所以重播不可能與原本那一次算出不同的 alpha。
+    """
+    return make_blend_alpha(_blend_base(mask, feather_px), feather_px=feather_px)
+
+
 def prepare_masks(
     mask: np.ndarray,
     *,
@@ -143,11 +160,15 @@ def prepare_masks(
     **第二層是給模型的額外邊距**，讓它看不到物件的柔邊與陰影
     （見 ``DEFAULT_DILATE_PX`` 的說明）。
     """
-    prepared = fill_holes(mask)
-    prepared = remove_specks(prepared, 64)
-
-    # 關鍵：膨脹量等於羽化半徑，令 alpha 在物件邊界上剛好到 1.0。
-    blend_base = dilate(prepared, feather_px)
+    blend_base = _blend_base(mask, feather_px)
     denoise = dilate(blend_base, dilate_px)
 
     return denoise, make_blend_alpha(blend_base, feather_px=feather_px)
+
+
+def _blend_base(mask: np.ndarray, feather_px: int) -> np.ndarray:
+    """寫入範圍：填洞 → 去斑 → 膨脹羽化半徑。
+
+    這是 alpha 與模型遮罩**共同**的起點，所以只有一份實作。
+    """
+    return dilate(remove_specks(fill_holes(mask), 64), feather_px)

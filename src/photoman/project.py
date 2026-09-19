@@ -69,11 +69,16 @@ class OutputSettings(BaseModel):
 
 
 class Checksum(BaseModel):
-    """校驗環量度——模型在「被告知不要改」的區域改了多少（§5.2）。"""
+    """校驗環量度——模型在「被告知不要改」的區域改了多少（§5.2）。
+
+    ``max_abs_diff`` 可以是 ``None``：那代表裁切區裡沒有校驗環可用
+    （遮罩填滿了整個裁切框）。**不可以用 nan 代替**——JSON 沒有這個值，
+    寫進專案檔會令它讀不回來。
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    max_abs_diff: float
+    max_abs_diff: float | None
     at: str
 
 
@@ -116,6 +121,13 @@ class GenerativeLayer(LayerBase):
 
     ``mask_sha256`` 要進簽名——使用者改了遮罩，快取必須失效。
     漏了這一項的話，改了遮罩卻拿到舊結果，而且沒有任何跡象。
+
+    ``feather_px`` 也要進簽名，而且理由更硬：它決定合成用的 alpha
+    （``make_blend_alpha``），**少了它就重現不了這一層的像素**。
+
+    ``dilate_px`` 進簽名是為了另一個理由，**不是** alpha——
+    實測 alpha 與它無關（它只影響交給模型的那個遮罩）。
+    它改變的是模型的輸入，也就改變了生成出來的內容，所以仍然必須進簽名。
     """
 
     type: Literal["generative"] = "generative"
@@ -124,6 +136,7 @@ class GenerativeLayer(LayerBase):
     mask_sha256: str
     prompt: str | None = None
     feather_px: int = 12
+    dilate_px: int = 16
     scale: float | None = None
 
     # ── 跑完之後才填的 ──
@@ -138,6 +151,7 @@ class GenerativeLayer(LayerBase):
             "prompt": self.prompt,
             "crop": list(self.crop),
             "feather_px": self.feather_px,
+            "dilate_px": self.dilate_px,
             "mask": self.mask_sha256,
         }
 

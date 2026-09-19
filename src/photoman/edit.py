@@ -47,13 +47,23 @@ API_THRESHOLD = 2.0
 
 @dataclass(frozen=True)
 class EditResult:
-    """一次編輯的結果。"""
+    """一次編輯的結果。
+
+    ``patch`` 是**色彩與顆粒對齊之後**的那一塊，不是模型的原生輸出。
+    留著它是為了令這次編輯可以**重播**：連同遮罩與裁切框，
+    :func:`photoman.layers.render` 能重現完全相同的位元組。
+    對齊本身需要 ``base_crop`` 與遮罩，那兩個在重播時未必能重建，
+    所以留對齊後的成品，不留原生的。
+    """
 
     image: np.ndarray  # uint8 sRGB，合成後的完整影像
+    patch: np.ndarray  # uint8 sRGB，裁切區，已對齊
     crop: CropBox
     mask_sha256: str
     checksum: float  # 校驗環量度；nan 代表沒有校驗環可用。**診斷用，不是品質分數**
     method: str
+    dilate_px: int = DEFAULT_DILATE_PX
+    feather_px: int = DEFAULT_FEATHER_PX
 
     def is_trustworthy(self, threshold: float | None = None) -> bool:
         """這張結果是否落在指定的校驗環門檻內。
@@ -100,6 +110,13 @@ def apply_generative_edit(
         raise ValueError("遮罩是空的——沒有東西要改")
 
     denoise, alpha = prepare_masks(mask, dilate_px=dilate_px, feather_px=feather_px)
+
+    # 前處理會移除小於 64 像素的連通塊——那是為了清分割模型在背景紋理上
+    # 留下的零星小塊。副作用是「用細筆刷點一下」會整塊被清掉，
+    # 而 plan_crop 接著會說「遮罩是空的」，那句話對使用者完全對不上。
+    if not denoise.any():
+        raise ValueError("選取的範圍太小了——用粗一點的筆刷，或者框大一點。")
+
     crop = plan_crop(denoise, margin_ratio=margin_ratio, min_margin_px=min_margin_px)
 
     x, y, width, height = crop
@@ -124,8 +141,11 @@ def apply_generative_edit(
 
     return EditResult(
         image=image,
+        patch=patch,
         crop=crop,
         mask_sha256=mask_digest(mask),
         checksum=delta,
         method=method,
+        dilate_px=dilate_px,
+        feather_px=feather_px,
     )

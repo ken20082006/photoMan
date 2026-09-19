@@ -23,6 +23,8 @@ import numpy as np
 from PIL import Image
 
 from photoman.image import SourceInfo, load_srgb
+from photoman.layers import EditLayer
+from photoman.layers import render as render_layers
 from photoman.project import (
     SCHEMA_VERSION,
     Checksum,
@@ -71,11 +73,16 @@ class ProjectStore:
         source_path: str | Path,
         *,
         name: str | None = None,
+        loaded: SourceInfo | None = None,
     ) -> ProjectStore:
-        """由一張原圖建立新專案。"""
+        """由一張原圖建立新專案。
+
+        ``loaded`` 已經解碼好的原圖可以直接交進來。介面在開啟圖片時
+        本來就會解碼一次，42 MP 的圖再解一次要多等好幾秒。
+        """
         directory = Path(directory)
         source_path = Path(source_path).resolve()
-        loaded = load_srgb(source_path)
+        loaded = loaded if loaded is not None else load_srgb(source_path)
 
         project = Project(
             schema_version=SCHEMA_VERSION,
@@ -88,8 +95,14 @@ class ProjectStore:
         return store
 
     @classmethod
-    def open(cls, directory: str | Path) -> ProjectStore:
-        """開啟既有專案，並核對原檔。"""
+    def open(cls, directory: str | Path, *, verify: bool = True) -> ProjectStore:
+        """開啟既有專案，並核對原檔。
+
+        ``verify=False`` 給「原檔可能已經換了位置」的情況用：那時呼叫方
+        已經知道內容相符（專案目錄就是以內容雜湊命名的），要先讀出記錄
+        才能把路徑改過去。其餘情況一律核對——默默用一張不同的圖繼續跑
+        比報錯糟得多。
+        """
         directory = Path(directory)
         path = directory / PROJECT_FILE
         if not path.exists():
@@ -97,8 +110,21 @@ class ProjectStore:
 
         project = Project.model_validate_json(path.read_text(encoding="utf-8"))
         store = cls(directory, project)
-        store.verify_source()
+        if verify:
+            store.verify_source()
         return store
+
+    def repoint_source(self, path: str | Path) -> None:
+        """把來源引用改到新的路徑——**內容必須相同，否則就是錯的**。
+
+        典型情況：原檔被搬走，或上傳的暫存檔被清掉之後使用者重新上傳
+        同一張照片。呼叫方要先確認內容雜湊相符。
+
+        ``SourceRef`` 是 frozen，所以整塊換掉而不是改欄位。
+        """
+        self.project.source = self.project.source.model_copy(
+            update={"path": str(Path(path).resolve())}
+        )
 
     def verify_source(self) -> None:
         """核對原檔仍在，而且內容未變。"""
@@ -174,6 +200,19 @@ class ProjectStore:
         self.project.layers.append(layer)
         return layer
 
+    def remove_last_layer(self) -> GenerativeLayer | None:
+        """移除最後一層，回傳它（供復原堆疊使用）；沒有生成層就回傳 ``None``。
+
+        **遮罩與貼片的檔案刻意不刪。** 重做要用它們，而它們只有零點幾 MB。
+        孤兒檔案的下場是佔一點磁碟，不是拿到錯的結果——這個交換是值得的。
+        """
+        for index in range(len(self.project.layers) - 1, -1, -1):
+            layer = self.project.layers[index]
+            if isinstance(layer, GenerativeLayer):
+                del self.project.layers[index]
+                return layer
+        return None
+
     def apply_result(
         self,
         layer_id: str,
@@ -200,6 +239,26 @@ class ProjectStore:
         layer.checksum = checksum
         layer.cache_key = cache_key
         return True
+
+    # ── 重播 ────────────────────────────────────────────────────
+
+    def render(self, source: np.ndarray | None = None) -> np.ndarray:
+        """由磁碟上的遮罩與貼片重播整個專案，回傳 uint8 sRGB。
+
+        **這是重開專案的入口**：它只需要專案目錄裡的東西，
+        不必知道當初是怎麼編輯的、更不必重跑任何模型。
+        """
+        if source is None:
+            source = load_srgb(self.project.source.path).srgb
+
+        edits = []
+        for layer in self.project.enabled_layers():
+            if not isinstance(layer, GenerativeLayer):
+                raise NotImplementedError(f"圖層 {layer.id} 的類型還沒有執行引擎，這個專案無法重播")
+            edits.append(
+                EditLayer.from_edit(layer, self.read_mask(layer.id), self.read_result(layer.id))
+            )
+        return render_layers(source, edits)
 
     def cached_result(self, layer_id: str) -> np.ndarray | None:
         """若快取鍵仍然相符，回傳快取的結果；否則回傳 ``None``。

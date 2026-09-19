@@ -46,6 +46,15 @@ def work_dir() -> Path:
     return config_dir() / "work"
 
 
+def projects_dir() -> Path:
+    """專案放這裡——**不在 repo 之內**，理由與設定檔相同。
+
+    使用者的照片有版權，不應該有機會被 `git add -A` 掃進去；
+    專案目錄裡有遮罩與貼片，那些都是照片的衍生物。
+    """
+    return config_dir() / "projects"
+
+
 def load() -> dict[str, Any]:
     """讀出設定。缺少的欄位以預設值補齊（深層合併）。"""
     path = config_path()

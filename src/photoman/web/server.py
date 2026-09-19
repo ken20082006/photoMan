@@ -17,6 +17,7 @@ import tempfile
 import threading
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -27,10 +28,14 @@ from PIL import Image
 from pydantic import BaseModel
 
 from photoman import config
-from photoman.edit import apply_generative_edit
-from photoman.image import load_srgb
+from photoman.edit import EditResult, apply_generative_edit
+from photoman.image import SourceInfo, load_srgb
+from photoman.layers import EditLayer
+from photoman.layers import render as render_layers
 from photoman.paths import LAMA_MODEL_FILE, MODELS_DIR, SAM_DECODER_FILE, SAM_ENCODER_FILE
+from photoman.project import Checksum, GenerativeLayer
 from photoman.segment import get_segmenter
+from photoman.store import PROJECT_FILE, ProjectStore, SourceChangedError
 
 STATIC = Path(__file__).parent / "static"
 
@@ -53,42 +58,92 @@ def _mask_overlay(mask: np.ndarray, colour=(255, 60, 60), alpha=110) -> np.ndarr
     return overlay
 
 
+def _downscale(image: np.ndarray) -> np.ndarray:
+    """縮成預覽大小。原圖可能是 42 MP，直接送給瀏覽器既慢又沒有意義。
+
+    ★ **預覽只給眼睛看，永遠不可以用來合成。** 它經過 LANCZOS 重新取樣，
+    已經不是原檔的位元組了。
+    """
+    height, width = image.shape[:2]
+    scale = min(1.0, PREVIEW_MAX / max(height, width))
+    if scale >= 1.0:
+        return image
+    return np.asarray(
+        Image.fromarray(image).resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS
+        )
+    )
+
+
 @dataclass
 class Session:
-    """目前的編輯狀態。單一使用者、一次一張圖。"""
+    """目前的編輯狀態。單一使用者、一次一張圖。
+
+    **``source`` 永遠不變，``working`` 才是編輯的起點。**
+    這是整個多步編輯的核心：每一次執行都套用在 ``working`` 上，
+    而 ``working`` 是 ``render(source, layers)`` 的結果。
+    在這之前，每一次執行都套用在最原始的那張圖上——所以第二次執行
+    會把第一次的成果整塊重新生成（實測 12000 個像素裡有 11997 個被改掉）。
+    """
 
     source_path: Path | None = None
-    base: np.ndarray | None = None  # uint8 sRGB，原解析度
-    preview: np.ndarray | None = None  # 給瀏覽器看的縮圖
+    source: np.ndarray | None = None  # uint8 sRGB，原解析度，**永不改動**
+    working: np.ndarray | None = None  # uint8 sRGB，= render(source, layers)
+    source_preview: np.ndarray | None = None
+    preview: np.ndarray | None = None  # **working** 的縮圖
     scale: float = 1.0  # 預覽 / 原圖
     mask: np.ndarray | None = None  # bool，**原圖座標**
-    result: np.ndarray | None = None  # uint8 sRGB，原解析度
-    checksum: float | None = None
-    method: str = "lama"
+    layers: list[EditLayer] = field(default_factory=list)  # 已接受的編輯，順序即堆疊
+    redo: list[EditLayer] = field(default_factory=list)  # 復原堆疊
+    store: ProjectStore | None = None  # 掛上的專案；掛不上時為 None（仍可編輯）
+    project_note: str | None = None
+    revision: int = 0  # 每次重算 working 就加一——SAM 的嵌入快取靠它失效
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def require_image(self) -> None:
-        if self.base is None:
+        if self.source is None:
             raise HTTPException(status_code=400, detail="尚未開啟圖片")
 
     def to_full(self, x: float, y: float) -> tuple[int, int]:
         """預覽座標 → 原圖座標。"""
         return (int(round(x / self.scale)), int(round(y / self.scale)))
 
+    def recompose(self) -> None:
+        """由原檔重播所有圖層，重算 working 與預覽。
+
+        **每一次圖層有變動都整個重算**，不做增量。重算是複製加幾次貼上，
+        而復原本來就需要它；這樣「working 永遠等於 render(source, layers)」
+        是一個不變式，不是一個要小心維護的但書。
+        """
+        self.working = render_layers(self.source, self.layers)
+        self.preview = _downscale(self.working)
+        self.revision += 1
+
     def snapshot(self) -> dict:
         """目前的狀態——介面用它決定顯示甚麼。"""
         return {
-            "opened": self.base is not None,
+            "opened": self.source is not None,
             "filename": self.source_path.name if self.source_path else None,
-            "width": int(self.base.shape[1]) if self.base is not None else 0,
-            "height": int(self.base.shape[0]) if self.base is not None else 0,
+            "width": int(self.source.shape[1]) if self.source is not None else 0,
+            "height": int(self.source.shape[0]) if self.source is not None else 0,
             "preview_width": int(self.preview.shape[1]) if self.preview is not None else 0,
             "preview_height": int(self.preview.shape[0]) if self.preview is not None else 0,
             "has_mask": bool(self.mask is not None and self.mask.any()),
             "mask_pixels": int(self.mask.sum()) if self.mask is not None else 0,
-            "has_result": self.result is not None,
-            "checksum": self.checksum,
-            "method": self.method,
+            "has_result": bool(self.layers),
+            "layers": [
+                {
+                    "id": edit.layer.id,
+                    "method": edit.layer.method,
+                    "prompt": edit.layer.prompt,
+                    "crop": list(edit.layer.crop),
+                }
+                for edit in self.layers
+            ],
+            "can_undo": bool(self.layers),
+            "can_redo": bool(self.redo),
+            "project_saved": self.store is not None,
+            "project_note": self.project_note,
             "models_ready": _models_ready(),
         }
 
@@ -141,9 +196,10 @@ def state() -> dict:
 
 
 @app.get("/api/preview")
-def preview() -> dict:
+def preview(source: bool = False) -> dict:
+    """預覽圖。預設是**目前的成品**（所有已接受的編輯）；``?source=true`` 是原圖。"""
     SESSION.require_image()
-    return {"image": _png_data_url(SESSION.preview)}
+    return {"image": _png_data_url(SESSION.source_preview if source else SESSION.preview)}
 
 
 @app.get("/api/settings")
@@ -197,36 +253,81 @@ def open_path(payload: dict) -> dict:
 def _open(path: Path, *, display_name: str) -> dict:
     with SESSION.lock:
         loaded = load_srgb(path)
-        base = loaded.srgb
-        height, width = base.shape[:2]
-
-        scale = min(1.0, PREVIEW_MAX / max(height, width))
-        if scale < 1.0:
-            preview = np.asarray(
-                Image.fromarray(base).resize(
-                    (max(1, int(width * scale)), max(1, int(height * scale))),
-                    Image.LANCZOS,
-                )
-            )
-        else:
-            preview = base
+        source = loaded.srgb
+        height, width = source.shape[:2]
 
         SESSION.source_path = path
-        SESSION.base = base
-        SESSION.preview = preview
-        SESSION.scale = scale
+        SESSION.source = source
+        SESSION.layers = []
+        SESSION.redo = []
         SESSION.mask = np.zeros((height, width), dtype=bool)
-        SESSION.result = None
-        SESSION.checksum = None
+        SESSION.store = None
+        SESSION.project_note = None
+        SESSION.scale = min(1.0, PREVIEW_MAX / max(height, width))
+        SESSION.source_preview = _downscale(source)
+
+        _attach_project(SESSION, path, loaded)
+        SESSION.recompose()
 
     # 預先算好嵌入，令第一次點擊就有反應（編碼是慢的那一半）。
     # 沒有 SAM 模型時仍然可以看圖，只是不能點擊選取——所以這裡刻意吞掉錯誤。
     with contextlib.suppress(ImportError, FileNotFoundError):
-        _segmenter().embed(base)
+        _segmenter().embed(SESSION.working)
 
     snapshot = SESSION.snapshot()
     snapshot["display_name"] = display_name
     return snapshot
+
+
+# ── 專案 ────────────────────────────────────────────────────────
+#
+# 專案**依原檔的內容雜湊命名**，所以「同一個目錄」就等於「同一張照片」：
+# 照片被搬到別的位置、或者重新上傳同一張，都會接回同一個專案，
+# 使用者不必做任何選擇。
+#
+# 掛不上就降級成純記憶體——編輯、復原、匯出全部照常，只是關掉瀏覽器
+# 就沒了。**這件事必須讓使用者看見**（見 project_note），
+# 默默不存檔是這裡唯一不能接受的失敗方式。
+
+
+def _attach_project(session: Session, path: Path, loaded: SourceInfo) -> None:
+    directory = config.projects_dir() / loaded.info.sha256
+    try:
+        if (directory / PROJECT_FILE).exists():
+            # 不核對來源：目錄名就是這次開啟的內容雜湊，兩者相符就是同一張照片。
+            # 核對的是**記錄裡的那條路徑**，而它可能已經過期（照片被搬走、
+            # 或上傳的暫存檔被清掉）——那正是下面要修的情況。
+            store = ProjectStore.open(directory, verify=False)
+            if Path(store.project.source.path) != path:
+                store.repoint_source(path)
+                store.save()
+        else:
+            store = ProjectStore.create(directory, path, name=path.stem, loaded=loaded)
+    except (OSError, SourceChangedError, ValueError) as exc:
+        session.store = None
+        session.project_note = f"這次的修改不會被保存：{exc}"
+        return
+
+    session.store = store
+    session.layers, session.project_note = _load_layers(store)
+
+
+def _load_layers(store: ProjectStore) -> tuple[list[EditLayer], str | None]:
+    """由專案讀回圖層。讀到壞掉的那一層就停在這裡，保留前面能重播的部分。
+
+    這是刻意的：一個壞掉的貼片不應該令整份工作變成不可開啟。
+    """
+    edits: list[EditLayer] = []
+    for layer in store.project.enabled_layers():
+        if not isinstance(layer, GenerativeLayer):
+            break
+        try:
+            edits.append(
+                EditLayer.from_edit(layer, store.read_mask(layer.id), store.read_result(layer.id))
+            )
+        except (OSError, ValueError) as exc:
+            return edits, f"第 {len(edits) + 1} 層的材料不完整，只還原到前一層：{exc}"
+    return edits, None
 
 
 # ── 選取 ────────────────────────────────────────────────────────
@@ -243,23 +344,16 @@ def select(request: SelectRequest) -> dict:
     SESSION.require_image()
     with SESSION.lock:
         x, y = SESSION.to_full(request.x, request.y)
-        height, width = SESSION.base.shape[:2]
+        height, width = SESSION.source.shape[:2]
         if not (0 <= x < width and 0 <= y < height):
             raise HTTPException(status_code=400, detail="點擊位置在圖片之外")
 
         try:
-            region = _segmenter().segment(SESSION.base, point=(x, y))
+            region = _segment(SESSION, point=(x, y))
         except (ImportError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        if request.mode == "subtract":
-            SESSION.mask &= ~region
-        else:
-            SESSION.mask |= region
-        SESSION.result = None
-        SESSION.checksum = None
-
-        return _mask_payload()
+        return _apply_region(region, request.mode)
 
 
 class BoxRequest(BaseModel):
@@ -281,17 +375,23 @@ def select_box(request: BoxRequest) -> dict:
         x0, x1 = sorted((x0, x1))
         y0, y1 = sorted((y0, y1))
         try:
-            region = _segmenter().segment(SESSION.base, box=(x0, y0, x1, y1))
+            region = _segment(SESSION, box=(x0, y0, x1, y1))
         except (ImportError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        if request.mode == "subtract":
-            SESSION.mask &= ~region
-        else:
-            SESSION.mask |= region
-        SESSION.result = None
-        SESSION.checksum = None
-        return _mask_payload()
+        return _apply_region(region, request.mode)
+
+
+def _segment(session: Session, **hints) -> np.ndarray:
+    """在**目前的成品**上做分割，不是在原檔上。
+
+    這一點很重要：編輯過之後，使用者看到的是 working。若拿原檔去分割，
+    「自動選取」會選到一個畫面上已經不存在的東西，而且不會有任何錯誤訊息。
+
+    ``revision`` 也要帶進去——嵌入快取的鍵只看縮圖的粗略取樣，
+    一個小物件的移除不會改變那些取樣點，於是會拿到編輯前的嵌入。
+    """
+    return _segmenter().segment(session.working, token=session.revision, **hints)
 
 
 @app.post("/api/clear_mask")
@@ -299,23 +399,124 @@ def clear_mask() -> dict:
     SESSION.require_image()
     with SESSION.lock:
         SESSION.mask[:] = False
-        SESSION.result = None
-        SESSION.checksum = None
         return _mask_payload()
 
 
-def _mask_payload() -> dict:
-    overlay = _mask_overlay(SESSION.mask)
-    preview_overlay = np.asarray(
-        Image.fromarray(overlay).resize(
-            (SESSION.preview.shape[1], SESSION.preview.shape[0]), Image.NEAREST
-        )
+def _apply_region(region: np.ndarray, mode: str) -> dict:
+    """把一塊區域併進（或由遮罩移出）目前的選取。"""
+    if mode == "subtract":
+        SESSION.mask &= ~region
+    else:
+        SESSION.mask |= region
+    return _mask_payload()
+
+
+def _downscale_mask(mask: np.ndarray) -> np.ndarray:
+    """把原圖座標的遮罩縮到預覽解析度。
+
+    用 BOX（區域平均）而不是 NEAREST：1 像素寬的筆畫在縮圖上只有
+    零點幾像素，NEAREST 會令它整條消失或斷成虛線，而使用者正在畫的
+    那一筆會看起來像「沒有反應」。
+    """
+    height, width = SESSION.preview.shape[:2]
+    if mask.shape[:2] == (height, width):
+        return mask
+    small = Image.fromarray(mask.astype(np.uint8) * 255, mode="L").resize(
+        (width, height), Image.BOX
     )
+    return np.asarray(small) > 0
+
+
+def _mask_payload() -> dict:
+    # 疊圖只在**預覽解析度**上色。42 MP 的圖若先造全解析度 RGBA 再縮小，
+    # 每一筆圈選都要配置近 200 MB，而畫面上看到的結果完全一樣。
     return {
-        "overlay": _png_data_url(preview_overlay),
-        "mask_pixels": int(SESSION.mask.sum()),
+        "overlay": _png_data_url(_mask_overlay(_downscale_mask(SESSION.mask))),
+        "mask_pixels": int(np.count_nonzero(SESSION.mask)),
         "has_mask": bool(SESSION.mask.any()),
     }
+
+
+# ── 手動圈選 ────────────────────────────────────────────────────
+#
+# 使用者自己畫的範圍**就是遮罩本身**，不經過任何模型判斷。
+#
+# 這是刻意的：SAM 回答的是「這一團像素是甚麼」，那在物件邊界清楚時很好用；
+# 但當使用者心裡已經有一條明確的界線（或者要改的東西根本不是一個物件，
+# 例如一片天空、一條裂痕、一段文字），任何自動判斷都只是多一個出錯的地方。
+# 空間問題要用空間通道解決——而滑鼠本身就是那個通道。
+
+
+class RectRequest(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    mode: str = "add"  # add | subtract
+
+
+@app.post("/api/mask/rect")
+def mask_rect(request: RectRequest) -> dict:
+    """使用者拉出的矩形直接變成遮罩——不問框裡是甚麼。"""
+    SESSION.require_image()
+    with SESSION.lock:
+        x0, y0 = SESSION.to_full(request.x0, request.y0)
+        x1, y1 = SESSION.to_full(request.x1, request.y1)
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+
+        height, width = SESSION.source.shape[:2]
+        x0, x1 = max(0, min(width, x0)), max(0, min(width, x1))
+        y0, y1 = max(0, min(height, y0)), max(0, min(height, y1))
+        if x0 == x1 or y0 == y1:
+            raise HTTPException(status_code=400, detail="框太小了——請拉出一個範圍")
+
+        region = np.zeros((height, width), dtype=bool)
+        region[y0:y1, x0:x1] = True
+        return _apply_region(region, request.mode)
+
+
+class StrokeRequest(BaseModel):
+    # data URL。白色＝使用者塗到的地方，其他顏色一律當作沒塗到。
+    image: str
+    mode: str = "add"
+
+
+@app.post("/api/mask/stroke")
+def mask_stroke(request: StrokeRequest) -> dict:
+    """把一筆筆刷軌跡併進遮罩。
+
+    **由瀏覽器負責畫那筆畫，伺服器只負責換算。** 筆刷的取樣、
+    壓感、筆畫重疊都發生在畫布上——在那里它們是免費的，
+    送過來只是一張圖。
+    """
+    SESSION.require_image()
+    with SESSION.lock:
+        return _apply_region(_decode_mask_png(request.image), request.mode)
+
+
+def _decode_mask_png(data_url: str) -> np.ndarray:
+    """把瀏覽器送來的遮罩圖換算成**原圖座標**的 bool 陣列。
+
+    瀏覽器只知道預覽圖有多大（原圖可能是 42 MP），所以換算只在這裡做一次。
+
+    放大用雙線性再以 0.5 為界，不用最近鄰：最近鄰會令筆畫邊緣在原圖上
+    留下階梯，而那個階梯比羽化半徑粗的時候就看得出鋸齒。雙線性給的是
+    半像素精度的邊界，正好是筆刷本來就有的不確定度。
+    """
+    payload = data_url.partition(",")[2]
+    if not payload:
+        raise HTTPException(status_code=400, detail="遮罩圖的格式不對")
+    try:
+        image = Image.open(io.BytesIO(base64.b64decode(payload)))
+        small = np.asarray(image.convert("L"))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"遮罩圖無法解讀：{exc}") from exc
+
+    height, width = SESSION.source.shape[:2]
+    if small.shape[:2] != (height, width):
+        small = np.asarray(Image.fromarray(small).resize((width, height), Image.BILINEAR))
+    return small > 127
 
 
 # ── 執行編輯 ────────────────────────────────────────────────────
@@ -370,19 +571,23 @@ def apply(request: ApplyRequest) -> dict:
         if request.model:
             method = f"api:{request.model}"
         elif wants_instruction:
-            raise HTTPException(
-                status_code=400, detail="要下指令的話需要先選一個雲端模型。"
-            )
+            raise HTTPException(status_code=400, detail="要下指令的話需要先選一個雲端模型。")
         else:
-            method = "lama"
+            # 本機路徑。介面固定用 LaMa（品質明顯較好），但引擎可以由
+            # 呼叫方指定——測試用它換成 Telea，否則每一個端到端測試都要
+            # 付一次 LaMa 的模型載入（實測 12 秒）。
+            method = request.method or "lama"
 
         options: dict = {}
         if method.startswith("api:"):
             options = {"prompt": request.prompt, "resolution": request.resolution}
 
         try:
+            # ★ 由 **working** 起算，不是 source。這就是多步編輯的關鍵：
+            # 之前每一次都套用在最原始的那張圖上，所以第二次執行會把
+            # 第一次的成果整塊重新生成。
             result = apply_generative_edit(
-                SESSION.base,
+                SESSION.working,
                 SESSION.mask,
                 method=method,
                 dilate_px=request.dilate_px,
@@ -392,34 +597,157 @@ def apply(request: ApplyRequest) -> dict:
         except (ImportError, FileNotFoundError, ProviderError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        SESSION.result = result.image
-        SESSION.checksum = float(result.checksum)
-        SESSION.method = method
+        _accept(SESSION, result, method=method, prompt=request.prompt)
 
-        preview = np.asarray(
-            Image.fromarray(SESSION.result).resize(
-                (SESSION.preview.shape[1], SESSION.preview.shape[0]), Image.LANCZOS
-            )
-        )
         return {
-            "image": _png_data_url(preview),
-            "checksum": SESSION.checksum,
+            "image": _png_data_url(SESSION.preview),
+            "checksum": float(result.checksum),
             "method": method,
+            "layers": len(SESSION.layers),
         }
+
+
+def _accept(
+    session: Session,
+    result: EditResult,
+    *,
+    method: str,
+    prompt: str = "",
+) -> None:
+    """把一次執行的結果收下：變成一層、清空遮罩、清掉重做堆疊、寫進專案。
+
+    **執行即生效**（使用者的選擇）。前後對照仍然在——只是發生在執行之後
+    「看原圖／看成品」，而退路是復原，它是精確而且即時的。
+    """
+    layer = GenerativeLayer(
+        method=method,
+        crop=tuple(result.crop),
+        mask_sha256=result.mask_sha256,
+        prompt=prompt.strip() or None,
+        feather_px=result.feather_px,
+        dilate_px=result.dilate_px,
+    )
+    # from_edit 會在這裡檢查遮罩有沒有超出裁切框——此時還握有完整的遮罩。
+    edit = EditLayer.from_edit(layer, session.mask, result.patch)
+
+    session.layers.append(edit)
+    # 新的編輯令重做失效：那些層已經不在鏈上了。
+    session.redo = []
+
+    # working 直接沿用結果，不必整個重播——它就是由同一個純函數算出來的。
+    # （「working 永遠等於 render(source, layers)」由測試守著。）
+    session.working = result.image
+    session.preview = _downscale(session.working)
+    session.revision += 1
+
+    # 存檔要在清遮罩之前——遮罩就是這一層的材料。
+    _persist(session, edit, result)
+
+    # ★ 遮罩就地清空。清掉它是修好這個 bug 的第一步：留著的話下一次執行
+    # 會變成「上一個範圍 ∪ 新範圍」，兩塊一起重算。
+    session.mask[:] = False
+
+
+def _persist(session: Session, edit: EditLayer, result: EditResult) -> None:
+    """把新的一層寫進專案。專案掛不上時只記一則提示，編輯照常。"""
+    if session.store is None:
+        return
+    try:
+        layer = edit.layer
+        digest = session.store.write_mask(layer.id, session.mask)
+        if digest != layer.mask_sha256:
+            # 兩邊都是 mask_digest，正常不可能不同。真的不同就代表快取鏈
+            # 會對不上——寧可現在報錯，也不要之後拿到錯的結果。
+            raise ValueError("遮罩寫入後的雜湊與執行時不符")
+
+        session.store.add_layer(layer)
+        session.store.apply_result(
+            layer.id,
+            result_file=session.store.write_result(layer.id, edit.patch),
+            checksum=Checksum(max_abs_diff=_finite(result.checksum), at=_now()),
+            # 快取鍵要在圖層加進去之後才算——它是一條鏈，鍵包含上游。
+            cache_key=session.store.project.cache_keys()[layer.id],
+        )
+        session.store.save()
+    except (OSError, KeyError, ValueError) as exc:
+        session.store = None
+        session.project_note = f"寫入專案失敗，之後的修改不會被保存：{exc}"
+
+
+def _finite(value: float) -> float | None:
+    """校驗環量度可能是 nan——那代表裁切區裡沒有校驗環可用（遮罩填滿了它）。
+
+    JSON 沒有 nan，寫進去會令專案檔讀不回來，所以明確轉成「沒有這個數字」。
+    """
+    return float(value) if np.isfinite(value) else None
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+# ── 復原與重做 ──────────────────────────────────────────────────
+
+
+@app.post("/api/undo")
+def undo() -> dict:
+    """移除最後一層，並**把它的遮罩放回介面**。
+
+    放回遮罩是刻意的：最常見的用法是「邊緣還留了一點陰影 → 復原 →
+    把範圍擴大一點 → 再執行一次」。只把成品退回上一步的話，
+    使用者得重新圈一次同樣的地方。
+    """
+    SESSION.require_image()
+    with SESSION.lock:
+        if not SESSION.layers:
+            raise HTTPException(status_code=400, detail="沒有可以復原的修改")
+        edit = SESSION.layers.pop()
+        SESSION.redo.append(edit)
+        if SESSION.store is not None:
+            SESSION.store.remove_last_layer()
+            SESSION.store.save()
+        SESSION.recompose()
+        SESSION.mask |= edit.full_mask(SESSION.mask.shape)
+        return _undo_payload()
+
+
+@app.post("/api/redo")
+def redo() -> dict:
+    """把上一層放回去，並清空遮罩——與當初執行時一致。"""
+    SESSION.require_image()
+    with SESSION.lock:
+        if not SESSION.redo:
+            raise HTTPException(status_code=400, detail="沒有可以重做的修改")
+        edit = SESSION.redo.pop()
+        SESSION.layers.append(edit)
+        if SESSION.store is not None:
+            SESSION.store.add_layer(edit.layer)
+            SESSION.store.save()
+        SESSION.recompose()
+        SESSION.mask[:] = False
+        return _undo_payload()
+
+
+def _undo_payload() -> dict:
+    snapshot = SESSION.snapshot()
+    snapshot["image"] = _png_data_url(SESSION.preview)
+    snapshot["overlay"] = _mask_payload()["overlay"]
+    return snapshot
 
 
 @app.get("/api/result")
 def download_result() -> Response:
-    """匯出成品——**原解析度**，不是預覽。
+    """匯出成品——**原解析度**，不是預覽，而且含所有已接受的編輯。
 
     用 ``Response`` 而不是 ``FileResponse``：後者要的是檔案路徑，
     而我們在記憶體裡已經有現成的位元組，沒有理由先寫到磁碟再讀回來。
     """
     SESSION.require_image()
-    if SESSION.result is None:
+    if not SESSION.layers:
+        # 沒有任何編輯時成品就等於原檔，匯出它沒有意義。
         raise HTTPException(status_code=400, detail="還沒有結果可以匯出")
     buffer = io.BytesIO()
-    Image.fromarray(SESSION.result).save(buffer, format="PNG")
+    Image.fromarray(SESSION.working).save(buffer, format="PNG")
     name = (SESSION.source_path.stem if SESSION.source_path else "result") + "-photoman.png"
     return Response(
         content=buffer.getvalue(),

@@ -42,11 +42,16 @@ class Segmenter(Protocol):
         point: Point | None = None,
         box: Box | None = None,
         negative_points: Sequence[Point] = (),
+        token: object = None,
     ) -> np.ndarray:
         """回傳 bool 遮罩，**原圖座標、與 ``image`` 同尺寸**。
 
         ``point`` 是「這個就是了」，``negative_points`` 是「這些不是」。
         兩者可以併用：先點一下物件，若選多了就再點一下要排除的地方。
+
+        ``token`` 是快取的身分。同一個工作階段裡，影像可能被編輯過而
+        取樣點看不出來（移除一個小物件不會改變粗取樣的像素），
+        所以呼叫方要另外給一個會變化的值——見 ``_embed`` 的說明。
         """
         ...
 
@@ -97,13 +102,20 @@ class MobileSamSegmenter:
                 self._decoder = ort.InferenceSession(str(self.decoder_path), providers=providers)
         return self._encoder, self._decoder
 
-    def _embed(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    def _embed(
+        self, image: np.ndarray, token: object = None
+    ) -> tuple[np.ndarray, np.ndarray, float]:
         """計算（或取出快取的）圖像嵌入。
 
-        快取以「形狀 + 粗略內容摘要」為鍵。用粗略摘要而不是完整雜湊，
+        快取以「形狀 + 粗略內容摘要 + token」為鍵。用粗略摘要而不是完整雜湊，
         是因為完整雜湊 42 MP 要几百毫秒——而那個成本本身就違背了快取的目的。
+
+        ⚠️ **粗略摘要正是它的弱點**：移除一個小物件之後，那些取樣點多半
+        沒有變，於是會拿到編輯前的嵌入，然後在畫面上已經不存在的內容上
+        分割。所以呼叫方要給一個每次內容變動就變的 ``token``
+        （介面用的是「重算次數」）。
         """
-        key = (image.shape, image[::64, ::64].tobytes())
+        key = (image.shape, image[::64, ::64].tobytes(), token)
         if self._cache_key == key and self._cache is not None:
             return self._cache
 
@@ -129,12 +141,12 @@ class MobileSamSegmenter:
         self._cache = (embeddings, small, scale)
         return self._cache
 
-    def embed(self, image: np.ndarray) -> None:
+    def embed(self, image: np.ndarray, token: object = None) -> None:
         """預先計算嵌入。介面可以在載入圖片之後、使用者點擊之前呼叫它。
 
         這樣第一次點擊就不必等編碼——使用者只會感覺到「按下去就有反應」。
         """
-        self._embed(image)
+        self._embed(image, token)
 
     # ── 分割 ────────────────────────────────────────────────────
 
@@ -145,12 +157,13 @@ class MobileSamSegmenter:
         point: Point | None = None,
         box: Box | None = None,
         negative_points: Sequence[Point] = (),
+        token: object = None,
     ) -> np.ndarray:
         if point is None and box is None:
             raise ValueError("需要一個 point 或一個 box——沒有的話不知道要選甚麼")
 
         _, decoder = self._sessions()
-        embeddings, small, scale = self._embed(image)
+        embeddings, small, scale = self._embed(image, token)
         small_height, small_width = small.shape[:2]
         height, width = image.shape[:2]
 

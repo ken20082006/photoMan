@@ -325,15 +325,6 @@ class TestExportFormat:
         assert '$("export-hint").textContent' in js, "換格式時也要跟著說明改變"
 
 
-class TestWarningBanner:
-    def test_there_is_somewhere_to_show_the_warning(self, html: str) -> None:
-        assert re.search(r'id="warning-banner"', html)
-
-    def test_the_warning_is_shown_after_an_edit(self, js: str) -> None:
-        assert "function showWarning(" in js
-        assert "showWarning(payload.warning)" in js
-
-
 class TestOfflinePromise:
     def test_no_external_resources(self, html: str) -> None:
         """完全離線可用——沒有網絡時這個工具仍然要能用。"""

@@ -260,7 +260,6 @@
         <button id="view-after" class="on">看成品</button>
       </div>
       <div class="stat" id="result-stat"></div>
-      <div class="banner" id="warning-banner" hidden></div>
       <div class="stat" id="history-stat">還沒有修改</div>
       <div class="row">
         <button id="btn-undo" disabled>復原<small>退回上一步</small></button>
@@ -340,14 +339,6 @@ function hideBusy() { $("busy").hidden = true; }
 function showError(message) {
   const banner = $("error-banner");
   banner.textContent = message;
-  banner.hidden = !message;
-}
-
-// 「這個模型沒有照遮罩辦事」之類的提醒。與錯誤分開：
-// 結果是可用的，只是使用者應該知道它偏離了多少。
-function showWarning(message) {
-  const banner = $("warning-banner");
-  banner.textContent = message || "";
   banner.hidden = !message;
 }
 
@@ -676,7 +667,6 @@ async function applyState(state) {
   workingImageURL = null;
   references = [];
   renderReferences();
-  showWarning("");
   if (drawLayer) drawLayer.destroyChildren();
   if (detailLayer) detailLayer.destroyChildren();
   detail = null;
@@ -887,7 +877,6 @@ async function runApply() {
     const how = model ? "雲端模型" : "本機模型";
     $("result-stat").textContent =
       `完成（${how}，用時 ${seconds} 秒）。圈選範圍以外完全沒有改動。`;
-    showWarning(payload.warning);
     await setView("after");
     await setOverlay(null);   // 遮罩已經清空
     maskOverlayURL = null;

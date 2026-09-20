@@ -28,7 +28,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from photoman import config
-from photoman.edit import API_THRESHOLD, EditResult, apply_generative_edit
+from photoman.edit import EditResult, apply_generative_edit
 from photoman.image import SourceInfo, load_srgb
 from photoman.layers import EditLayer
 from photoman.layers import render as render_layers
@@ -720,7 +720,7 @@ def apply(request: ApplyRequest) -> dict:
                 # 這不是「猜使用者的意圖」——先前試過讓使用者選，但那個選擇
                 # 本身才是負擔。現在介面直接寫明「只是要移除東西的話用本機」，
                 # 規則就只有一條。代價是用雲端移除東西時會與周圍有色差
-                # （實測 22.8／38.6 級），而那正是 `_trust_warning` 會講的事。
+                # （實測 22.8／38.6 級）——介面已經寫明「移除用本機」。
                 intent="edit" if method.startswith("api:") else "fill",
                 **options,
             )
@@ -734,7 +734,6 @@ def apply(request: ApplyRequest) -> dict:
             "checksum": float(result.checksum),
             "method": method,
             "layers": len(SESSION.layers),
-            "warning": _trust_warning(result, method),
         }
 
 
@@ -746,29 +745,6 @@ def _decode_references(data_urls: list[str]) -> list[np.ndarray]:
             detail=f"最多只可以附 {MAX_REFERENCES} 張參考圖，收到 {len(data_urls)} 張。",
         )
     return [np.asarray(_decode_data_url(url).convert("RGB")) for url in data_urls]
-
-
-def _trust_warning(result: EditResult, method: str) -> str | None:
-    """模型有沒有照遮罩辦事？沒有的話要說出來。
-
-    ★ 這是 ``EditResult.is_trustworthy`` 存在的理由，而它先前**從來沒有
-    被呼叫過**。校驗環量度是模型在「被告知不要改」的區域改了多少級；
-    本機引擎本來就會重繪整張裁切圖（實測 LaMa 是 24–27），但那無害——
-    我們只取遮罩內的像素。**雲端模型聲稱會保留遮罩外，所以它的偏離
-    才有意義**（實測 gpt-5.4-image-2 與 seedream-4.5 都是 255，滿級）。
-
-    不否決結果：那是使用者已經付錢的呼叫，而且合成器本來就守住了遮罩外。
-    但使用者有權知道自己拿到的是甚麼。
-    """
-    if not method.startswith("api:") or result.is_trustworthy(API_THRESHOLD):
-        return None
-    return (
-        f"這個模型沒有照遮罩辦事：它在你圈選的範圍之外也改了 "
-        f"{result.checksum:.0f} 級（滿級 255），也就是把整張重新畫了一遍。"
-        "圈選範圍以外的像素仍然逐位元組沒變，但圈內的顏色是它自己決定的，"
-        "可能與周圍不符。框得越緊，這個問題越小；"
-        "只是要移除東西的話，用本機移除的顏色會準得多。"
-    )
 
 
 def _accept(

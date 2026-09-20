@@ -524,53 +524,6 @@ class TestDetail:
         assert response.status_code == 400
 
 
-class TestTrustWarning:
-    """模型有沒有照遮罩辦事，要說出來。
-
-    `EditResult.is_trustworthy` 就是為此而寫的，而它先前從來沒有被呼叫過。
-    """
-
-    def test_no_warning_for_a_local_engine(self, client, sample_image) -> None:
-        """本機引擎本來就會重繪整張裁切圖，而那無害——我們只取遮罩內。"""
-        _open(client, sample_image)
-        client.post("/api/mask/rect", json={"x0": 80, "y0": 60, "x1": 150, "y1": 100})
-
-        payload = client.post("/api/apply", json={"method": "telea"}).json()
-
-        assert payload["warning"] is None
-
-    def test_a_warning_when_the_model_ignores_the_mask(self, monkeypatch) -> None:
-        from photoman.edit import EditResult
-
-        result = EditResult(
-            image=np.zeros((10, 10, 3), np.uint8),
-            patch=np.zeros((4, 4, 3), np.uint8),
-            crop=(0, 0, 4, 4),
-            mask_sha256="a" * 64,
-            checksum=255.0,
-            method="api:some/model",
-        )
-
-        warning = server._trust_warning(result, "api:some/model")
-
-        assert warning and "255" in warning
-        assert "沒有照遮罩辦事" in warning
-
-    def test_no_warning_when_the_model_stays_close(self) -> None:
-        from photoman.edit import EditResult
-
-        result = EditResult(
-            image=np.zeros((10, 10, 3), np.uint8),
-            patch=np.zeros((4, 4, 3), np.uint8),
-            crop=(0, 0, 4, 4),
-            mask_sha256="a" * 64,
-            checksum=1.0,
-            method="api:some/model",
-        )
-
-        assert server._trust_warning(result, "api:some/model") is None
-
-
 class TestReferenceImages:
     def test_local_removal_refuses_them(self, client, sample_image) -> None:
         """本機的 LaMa 沒有「參考圖」這個概念——它只會由邊界往內填。"""

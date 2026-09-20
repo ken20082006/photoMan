@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from photoman.mask import (
+    blend_alpha_for,
     dilate,
     fill_holes,
     make_blend_alpha,
@@ -129,6 +130,49 @@ class TestBlendAlpha:
         alpha = make_blend_alpha(mask, feather_px=0)
 
         np.testing.assert_array_equal(alpha, mask.astype(np.float32))
+
+
+class TestBlendAlphaFor:
+    """重播走的那一條路。它與 ``prepare_masks`` 必須是同一條，
+    否則「復原」會悄悄地算出與當初不同的畫面。"""
+
+    def test_matches_prepare_masks_exactly(self) -> None:
+        mask = np.zeros((60, 60), dtype=bool)
+        mask[20:40, 20:45] = True
+
+        assert np.array_equal(blend_alpha_for(mask, feather_px=12), prepare_masks(mask)[1])
+
+    def test_does_not_depend_on_dilate_px(self) -> None:
+        """★ 重播只帶 ``feather_px``，不帶 ``dilate_px``——這一條就是根據。
+
+        ``dilate_px`` 是給模型的額外邊距，它改變模型的輸入（生成內容），
+        但**不改變合成用的 alpha**。哪天這個性質不成立了，
+        重播會靜默地算錯，而兩邊的程式碼都「看起來很對」。
+        """
+        mask = np.zeros((80, 80), dtype=bool)
+        mask[30:50, 30:50] = True
+
+        narrow, alpha_narrow = prepare_masks(mask, dilate_px=4)
+        wide, alpha_wide = prepare_masks(mask, dilate_px=40)
+
+        assert not np.array_equal(narrow, wide), "dilate_px 應該影響模型遮罩"
+        assert np.array_equal(alpha_narrow, alpha_wide), "alpha 不可以受 dilate_px 影響"
+
+    def test_outside_the_write_region_is_exactly_zero(self) -> None:
+        """★ 與 ``make_blend_alpha`` 同一條契約，這裡再守一次。
+
+        要注意界線在哪：alpha 歸零的位置是**膨脹過的**遮罩邊界，
+        不是使用者畫的那條線。羽化帶是額外擴出去的一圈。
+        """
+        mask = np.zeros((40, 40), dtype=bool)
+        mask[12:28, 12:28] = True
+
+        alpha = blend_alpha_for(mask, feather_px=6)
+
+        outside = ~dilate(mask, 6)
+        assert np.all(alpha[outside] == 0.0)
+        assert not np.any(np.signbit(alpha[outside]))
+        assert (alpha > 0).any(), "膨脹進來的那一圈應該有東西"
 
 
 class TestBothMasks:

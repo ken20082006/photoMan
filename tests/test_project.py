@@ -97,6 +97,23 @@ class TestCacheKeyChain:
 
         assert first != second
 
+    def test_changes_when_dilate_px_changes(self) -> None:
+        """``dilate_px`` 改變的是**模型的輸入**，所以生成內容會不同。
+
+        它不影響合成用的 alpha（見 tests/test_layers.py），但一樣要進簽名。
+        漏掉它會令「改了邊距卻拿到舊結果」，而且沒有任何跡象。
+        """
+        first = self._project([_generative(dilate_px=16)]).cache_keys()
+        second = self._project([_generative(dilate_px=32)]).cache_keys()
+
+        assert first != second
+
+    def test_changes_when_feather_px_changes(self) -> None:
+        first = self._project([_generative(feather_px=12)]).cache_keys()
+        second = self._project([_generative(feather_px=24)]).cache_keys()
+
+        assert first != second
+
     def test_changes_when_the_mask_changes(self) -> None:
         """改了遮罩卻拿到舊結果，而且沒有任何跡象——這是最難察覺的失敗。"""
         first = self._project([_generative(mask_sha256="a" * 64)]).cache_keys()
@@ -313,3 +330,112 @@ class TestCachedResult:
 
         assert cached is not None
         np.testing.assert_array_equal(cached, patch)
+
+
+class TestRender:
+    """★ 重開專案要能重播出一模一樣的畫面。
+
+    這是「存檔」這件事的全部意義：專案檔裡只有描述與貼片，
+    成品是**算回來的**。算錯的話，使用者第二天打開會看到一張不同的圖，
+    而且不會有任何錯誤訊息。
+    """
+
+    def _store_with_one_layer(self, tmp_path):
+        from photoman.edit import apply_generative_edit
+
+        source = tmp_path / "in.png"
+        rng = np.random.default_rng(7)
+        photo = rng.integers(90, 170, size=(60, 90, 3), dtype=np.uint8)
+        photo[20:40, 30:60] = 25
+        Image.fromarray(photo, mode="RGB").save(source)
+
+        store = ProjectStore.create(tmp_path / "proj", source)
+        mask = np.zeros((60, 90), dtype=bool)
+        mask[18:42, 28:62] = True
+        result = apply_generative_edit(photo, mask, method="telea")
+
+        layer = GenerativeLayer(
+            method="telea",
+            crop=tuple(result.crop),
+            mask_sha256=mask_digest(mask),
+            feather_px=result.feather_px,
+            dilate_px=result.dilate_px,
+        )
+        store.add_layer(layer)
+        store.write_mask(layer.id, mask)
+        store.apply_result(
+            layer.id,
+            result_file=store.write_result(layer.id, result.patch),
+            checksum=Checksum(max_abs_diff=0.0, at="2026-09-19T00:00:00"),
+            cache_key=store.project.cache_keys()[layer.id],
+        )
+        store.save()
+        return store, result
+
+    def test_render_is_byte_identical_after_a_save_and_reopen(self, tmp_path) -> None:
+        store, result = self._store_with_one_layer(tmp_path)
+
+        before = store.render()
+        reopened = ProjectStore.open(tmp_path / "proj")
+        after = reopened.render()
+
+        assert np.array_equal(before, result.image), "重播與當初那一次不同"
+        assert np.array_equal(after, before), "重開之後的重播與存檔前不同"
+
+    def test_render_with_no_layers_is_the_original(self, tmp_path) -> None:
+        source = tmp_path / "in.png"
+        _source_image(source)
+        store = ProjectStore.create(tmp_path / "proj", source)
+
+        rendered = store.render()
+
+        assert rendered.shape == (32, 32, 3)
+        np.testing.assert_array_equal(rendered, np.asarray(Image.open(source)))
+
+    def test_remove_last_layer_takes_the_generative_one(self, tmp_path) -> None:
+        store, _ = self._store_with_one_layer(tmp_path)
+
+        removed = store.remove_last_layer()
+
+        assert removed is not None
+        assert store.project.layers == []
+        assert store.remove_last_layer() is None, "沒有了還再拿一次不應該出錯"
+
+    def test_the_mask_file_survives_undo_so_redo_can_use_it(self, tmp_path) -> None:
+        """復原**刻意不刪**遮罩與貼片——重做要用它們。"""
+        store, _ = self._store_with_one_layer(tmp_path)
+        layer_id = store.project.layers[0].id
+
+        store.remove_last_layer()
+
+        assert (tmp_path / "proj" / "masks" / f"{layer_id}.png").exists()
+        assert (tmp_path / "proj" / "cache" / f"{layer_id}.png").exists()
+
+
+class TestRepointSource:
+    def test_the_reference_follows_the_content(self, tmp_path) -> None:
+        """原檔被搬走之後，同一張照片要接回同一個專案。
+
+        典型情況：上傳的暫存檔被清掉，使用者重新上傳同一張照片。
+        """
+        first = tmp_path / "first.png"
+        _source_image(first)
+        store = ProjectStore.create(tmp_path / "proj", first)
+        moved = tmp_path / "moved.png"
+        moved.write_bytes(first.read_bytes())
+
+        store.repoint_source(moved)
+        store.save()
+
+        assert ProjectStore.open(tmp_path / "proj").project.source.path == str(moved.resolve())
+
+    def test_open_without_verification_skips_the_check(self, tmp_path) -> None:
+        """內容相符但路徑過期時，要先讀得出來才能把路徑改過去。"""
+        first = tmp_path / "first.png"
+        _source_image(first)
+        ProjectStore.create(tmp_path / "proj", first)
+        first.unlink()
+
+        assert ProjectStore.open(tmp_path / "proj", verify=False).project.name
+        with pytest.raises(SourceChangedError):
+            ProjectStore.open(tmp_path / "proj")

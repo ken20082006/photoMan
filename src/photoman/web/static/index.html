@@ -29,15 +29,15 @@
   #stage-wrap { position: absolute; inset: 0; }
   aside {
     width: 330px; background: var(--panel); border-left: 1px solid var(--line);
-    padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 13px;
   }
-  .group { display: flex; flex-direction: column; gap: 9px; }
+  .group { display: flex; flex-direction: column; gap: 8px; }
   .group h2 {
     font-size: 12px; font-weight: 600; color: var(--dim); margin: 0;
     letter-spacing: 1.2px; text-transform: none;
   }
   button {
-    padding: 11px 14px; border-radius: 8px; border: 1px solid var(--line);
+    padding: 9px 13px; border-radius: 8px; border: 1px solid var(--line);
     background: #30363e; color: var(--text); font: inherit; cursor: pointer;
     text-align: left; transition: background .12s, border-color .12s;
   }
@@ -96,6 +96,57 @@
   textarea { resize: vertical; line-height: 1.5; }
   select { cursor: pointer; }
   label { font-size: 13px; color: var(--dim); }
+  label b { color: var(--text); font-weight: 600; }
+  .group.slim { gap: 4px; }
+  /* 筆刷粗細只在筆刷工具下有意義。用淡化而不是隱藏：那一行消失會令
+     下面所有按鈕跳位，使用者在切換工具時會按錯。 */
+  .group.dim, .row.off { opacity: .35; pointer-events: none; }
+  input[type=range] {
+    width: 100%; accent-color: var(--accent); cursor: pointer; margin: 0;
+  }
+  /* 參考圖。縮圖留在瀏覽器記憶體，不上傳——只有按「執行」時才送出去。 */
+  label.file {
+    display: block; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px dashed var(--line); background: #2b3138; color: var(--text);
+    font-size: 13px; text-align: center;
+  }
+  label.file:hover { border-color: var(--accent); }
+  label.file small { display: block; color: var(--dim); font-size: 12px; margin-top: 2px; }
+  label.file.off { opacity: .45; cursor: not-allowed; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .thumbs:empty { display: none; }
+  .thumb {
+    position: relative; width: 54px; height: 54px; border-radius: 6px;
+    overflow: hidden; border: 1px solid var(--line);
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb button {
+    position: absolute; top: 0; right: 0; padding: 0 5px; border: none;
+    border-radius: 0 0 0 6px; background: rgba(0,0,0,.7); color: #fff;
+    font-size: 12px; line-height: 17px; cursor: pointer;
+  }
+  /* 畫布游標：平時是十字（要畫），按著中鍵拖曳時是「抓著」。 */
+  #stage-wrap.draw { cursor: crosshair; }
+  #stage-wrap.grabbing { cursor: grabbing; }
+  /* 縮放列。用 class 而不是 id 做版面——id 選擇器一旦設定 display，
+     就要另外補一條 [hidden] 規則（見 tests/test_ui_page.py）。 */
+  .zoombar {
+    position: absolute; top: 12px; left: 12px; z-index: 12;
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px; border-radius: 9px;
+    background: rgba(38, 43, 50, .92); border: 1px solid var(--line);
+    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  }
+  .zoombar button {
+    padding: 4px 9px; border-radius: 6px; border: 1px solid transparent;
+    background: transparent; color: var(--text); font-size: 13px;
+    line-height: 1.2; text-align: center;
+  }
+  .zoombar button:hover:not(:disabled) { background: #3a424c; }
+  #zoom-value { min-width: 58px; font-variant-numeric: tabular-nums; }
+  .zoombar-sep {
+    width: 1px; height: 18px; background: var(--line); margin: 0 3px;
+  }
   .busy {
     position: absolute; inset: 0; background: rgba(20,22,26,.72);
     display: flex; align-items: center; justify-content: center; z-index: 20;
@@ -134,34 +185,68 @@
            不會因為任何腳本錯誤而失效。 -->
       <label for="file-input" class="primary" id="btn-pick">選擇照片</label>
     </div>
+    <!-- 縮放列放在畫布上方，與市面上的修圖工具一樣。
+         百分比是**相對原圖**的（100% ＝ 原圖一個像素對螢幕一個像素），
+         不是相對預覽——那才是使用者心裡的那個數字。 -->
+    <div class="zoombar" id="zoom-bar">
+      <button id="zoom-out" title="縮小">−</button>
+      <button id="zoom-value" title="回到原尺寸（100%）">100%</button>
+      <button id="zoom-in" title="放大">＋</button>
+      <span class="zoombar-sep"></span>
+      <button id="btn-fit" title="讓整張照片填滿畫面">適合視窗</button>
+    </div>
     <div class="busy" id="busy" hidden><div class="spin"></div><div id="busy-text">處理中…</div></div>
   </div>
 
   <aside>
     <div class="banner" id="models-banner" hidden></div>
+    <div class="banner" id="save-banner" hidden></div>
     <div class="banner err" id="error-banner" hidden></div>
 
     <div class="group">
-      <h2>第一步：指一下要改的東西</h2>
-      <p class="hint">在照片上按一下那件東西，它就會被選中。</p>
+      <h2>第一步：圈出要改的地方</h2>
+      <p class="hint" id="tool-hint">用筆刷在照片上拖曳，塗出想改的範圍。</p>
       <div class="row">
-        <button id="tool-add" class="on">選取<small>按一下物件</small></button>
-        <button id="tool-sub">排除<small>按一下多選的部分</small></button>
+        <button id="tool-brush" class="on">筆刷<small>拖曳塗抹</small></button>
+        <button id="tool-box">方框<small>拉一個框</small></button>
+        <button id="tool-auto">自動<small>點選物件</small></button>
+      </div>
+      <div class="group slim" id="brush-row">
+        <label for="brush-size">筆刷粗細　<b id="brush-size-value">40</b></label>
+        <input type="range" id="brush-size" min="6" max="240" step="2" value="40">
+      </div>
+      <div class="row">
+        <button id="mode-add" class="on">加選</button>
+        <button id="mode-sub">擦掉</button>
       </div>
       <div class="stat" id="mask-stat">未選取任何東西</div>
       <button id="btn-clear">清除選取</button>
+      <p class="hint">
+        圈選的範圍就是會改的範圍，不經 AI 判斷。執行時會再向外擴張約 30 像素。
+      </p>
     </div>
 
     <div class="group">
       <h2>第二步：要做甚麼</h2>
       <p class="hint">
-        留空就只是移除選中的東西（本機執行，不需要 API key）。
-        或者描述你想做甚麼——「把她的動作改成揮手」「在這裡加一隻小狗」
-        ——那就會交給雲端模型。
+        留空＝移除選中的東西（本機，不需要 API key）。或者描述你想做甚麼，
+        那就交給雲端模型。
       </p>
-      <textarea id="prompt" rows="3"
+      <p class="hint">
+        <b>只是要移除東西的話，用本機</b>——免費、原解析度，而且顏色與周圍
+        對得準。雲端模型是用來「換成別的內容」的：它會重畫你框的整個範圍，
+        所以框得越緊越好。
+      </p>
+      <textarea id="prompt" rows="2"
         placeholder="留空＝移除選中的東西&#10;或輸入指令，例如：把這件衣服換成紅色"></textarea>
       <select id="model"><option value="">本機移除（不需要 API key）</option></select>
+      <div class="group slim" id="reference-group">
+        <!-- 用 label ＋原生檔案選擇，與「選擇照片」同一個理由：
+             腳本錯誤時它仍然能用。 -->
+        <label class="file" for="reference-input">加入參考圖<small id="reference-hint">選擇雲端模型之後才能用</small></label>
+        <input type="file" id="reference-input" accept="image/*" multiple hidden>
+        <div class="thumbs" id="reference-list"></div>
+      </div>
       <button class="primary" id="btn-apply" disabled>
         執行
         <small id="apply-hint">先選取一樣東西</small>
@@ -172,16 +257,36 @@
       <h2>第三步：看結果</h2>
       <div class="row">
         <button id="view-before">看原圖</button>
-        <button id="view-after">看成品</button>
+        <button id="view-after" class="on">看成品</button>
       </div>
       <div class="stat" id="result-stat"></div>
+      <div class="stat" id="history-stat">還沒有修改</div>
+      <div class="row">
+        <button id="btn-undo" disabled>復原<small>退回上一步</small></button>
+        <button id="btn-redo" disabled>重做<small>再做一次</small></button>
+      </div>
+      <div class="row">
+        <select id="export-format">
+          <option value="webp">WebP（檔案小）</option>
+          <option value="png">PNG（完全不失真）</option>
+        </select>
+      </div>
       <button id="btn-export" disabled>匯出成品（原解析度）</button>
+      <p class="hint" id="export-hint">
+        WebP 存照片比 PNG 小得多，而且肉眼看不出差別。
+      </p>
+      <p class="hint">
+        執行直接生效，不滿意按「復原」——它會把當初圈的範圍放回來。
+      </p>
     </div>
 
     <div class="group">
-      <h2>顯示</h2>
-      <p class="hint">滾輪縮放，拖曳移動。要對準細節時把它放大。</p>
-      <button id="btn-fit">fit to window</button>
+      <h2>移動與縮放</h2>
+      <p class="hint">
+        滾輪縮放；<b>按住滑鼠中鍵拖曳</b>可以移動畫面。
+        放大之後，畫面會自動改由原檔取樣，所以你看到的是真正的像素。
+      </p>
+      <p class="hint">縮放的按鈕在畫布上方。按百分比可以回到原尺寸（100%）。</p>
     </div>
   </aside>
 </main>
@@ -207,10 +312,24 @@
 "use strict";
 
 const IMG = { x: 0, y: 0 };
-let stage, imageLayer, maskLayer, maskImage, photoImage;
-let previewImageURL = null, maskOverlayURL = null, resultImageURL = null;
-let viewingResult = false;
-let tool = "add";
+let stage, imageLayer, maskLayer, detailLayer, drawLayer, maskImage, photoImage;
+let maskOverlayURL = null;
+// 兩張預覽各自快取。伺服器每次都要重新編碼一張 PNG（42 MP 的縮圖
+// 也要幾百 KB），切換前後對照不應該每次都付這個成本。
+let sourceImageURL = null, workingImageURL = null;
+let snapshot = null;       // 最後一次 /api/state——介面的唯一真相來源
+let view = "after";        // after = 成品，before = 原圖
+let tool = "brush";        // brush | box | auto
+let mode = "add";          // add | subtract——筆刷與方框共用
+let brushSize = 40;
+let stroke = null;         // 正在畫的那一筆
+let strokeNodes = [];      // 已放手但伺服器尚未回覆的筆畫
+let maskQueue = Promise.resolve();
+let panning = null;        // 正在拖曳畫面：{x, y, stageX, stageY}
+let detail = null;         // 放大時那一塊原檔細節：{x, y, node, overlayNode, key}
+let detailTimer = null;
+let references = [];       // 使用者附的參考圖：[{name, dataURL}]
+let modelInfo = {};        // model id → /api/models 回的那一筆
 
 const $ = (id) => document.getElementById(id);
 
@@ -236,22 +355,21 @@ function buildStage() {
   stage = new Konva.Stage({ container: "stage-wrap", width: 100, height: 100 });
   imageLayer = new Konva.Layer();
   maskLayer = new Konva.Layer();
+  detailLayer = new Konva.Layer();  // 放大時的原檔細節（蓋過預覽與它的疊圖）
+  drawLayer = new Konva.Layer();   // 正在畫的那一筆，畫在遮罩之上
   stage.add(imageLayer);
   stage.add(maskLayer);
+  stage.add(detailLayer);
+  stage.add(drawLayer);
 
   stage.on("wheel", (event) => {
     event.evt.preventDefault();
-    const scaleBy = 1.08;
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
-    const old = stage.scaleX();
-    const next = event.evt.deltaY < 0 ? old * scaleBy : old / scaleBy;
-    const clamped = Math.max(0.05, Math.min(20, next));
-    const origin = { x: (pointer.x - stage.x()) / old, y: (pointer.y - stage.y()) / old };
-    stage.scale({ x: clamped, y: clamped });
-    stage.position({ x: pointer.x - origin.x * clamped, y: pointer.y - origin.y * clamped });
+    zoomBy(event.evt.deltaY < 0 ? 1.08 : 1 / 1.08, pointer);
   });
 
+  
   window.addEventListener("resize", fitToWindow);
   return stage;
 }
@@ -271,6 +389,8 @@ function fitToWindow() {
     y: (wrap.clientHeight - previewImageURL_height() * scale) / 2,
   });
   stage.batchDraw();
+  updateZoomLabel();
+  clearDetail();   // fit 是「看全圖」，一定在預覽的密度之下
 }
 
 let previewSize = { width: 0, height: 0 };
@@ -286,13 +406,25 @@ function loadKonvaImage(url) {
   });
 }
 
-async function setPhoto(url, size) {
+async function setPhoto(url, size, { refit = false } = {}) {
+  // ★ **重新 fit 要由呼叫方明示，不是每次都做。**
+  //
+  // 先前每一次都 fit，所以「看原圖／看成品」一切換，縮放與位置就被重設
+  // ——而那正是使用者要對比的時候，重新對準一次很煩。切換檢視、執行、
+  // 復原、重做，位置都該留著；只有**開一張新圖**才重新 fit。
+  //
+  // ⚠️ 不要用「尺寸有沒有變」判斷：呼叫方傳進來的 `size` 就是目前的
+  // `previewSize`，所以那個比較永遠是「沒變」——第一版就是這樣寫的，
+  // 結果開新圖時完全不 fit（瀏覽器檢查抓到）。
   previewSize = size;
+
   const image = await loadKonvaImage(url);
   imageLayer.destroyChildren();
   photoImage = new Konva.Image({ image, x: 0, y: 0, width: size.width, height: size.height });
   imageLayer.add(photoImage);
-  fitToWindow();
+
+  if (refit) fitToWindow();
+  else stage.batchDraw();
 }
 
 async function setOverlay(url) {
@@ -320,6 +452,7 @@ function pointerToImage() {
 }
 
 async function clickSelect() {
+  if (!photoImage) return;
   const position = pointerToImage();
   if (!position) return;
   showBusy("選取中…");
@@ -327,16 +460,168 @@ async function clickSelect() {
     const payload = await api("/api/select", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x: position.x, y: position.y, mode: tool }),
+      body: JSON.stringify({ x: position.x, y: position.y, mode }),
     });
-    await setOverlay(payload.overlay);
-    updateMaskStat(payload);
-    clearResult();
+    await rememberOverlay(payload);
   } catch (error) {
     showError(error.message);
   } finally {
     hideBusy();
   }
+}
+
+// ── 手動圈選（筆刷、方框）────────────────────────────────────────
+//
+// **使用者畫的範圍就是遮罩本身**，中間不經過任何模型。
+//
+// 那一筆只在瀏覽器上畫（一條 Konva 圖形），放手才送給伺服器換算成
+// 原圖座標的遮罩。這樣塗抹本身是零延遲的——跟不上的話，使用者會
+// 以為滑鼠壞了——而伺服器只需要處理完成的筆畫。
+//
+// 每一筆之間**依序**送出（見 queueMask）。併發送出的話，回來的順序
+// 不保證，較早那一筆的疊圖會蓋掉較晚的，畫面上就看到選取「彈回去」。
+
+function clampToImage(position) {
+  // 筆刷要能沿著照片邊緣塗，所以超出邊界時貼齊，而不是整點丟棄。
+  return {
+    x: Math.max(0, Math.min(previewSize.width - 1, position.x)),
+    y: Math.max(0, Math.min(previewSize.height - 1, position.y)),
+  };
+}
+
+function beginStroke(position) {
+  if (!photoImage || !position) return;
+  const start = clampToImage(position);
+
+  const node = tool === "brush"
+    ? new Konva.Line({
+        points: [start.x, start.y],
+        stroke: "rgba(255,70,70,.55)", strokeWidth: brushSize,
+        lineCap: "round", lineJoin: "round", listening: false,
+      })
+    : new Konva.Rect({
+        x: start.x, y: start.y, width: 0, height: 0,
+        fill: "rgba(255,70,70,.30)", stroke: "rgba(255,120,120,.9)",
+        strokeWidth: 1, listening: false,
+      });
+
+  drawLayer.add(node);
+  // 粗細要**跟著這一筆記下來**：筆畫是排隊送出的，若在等待期間
+  // 使用者拉了粗細，讀當下的值就會把先前那一筆重畫成新的粗細。
+  stroke = { tool, mode, size: brushSize, start, points: [start], node };
+  drawLayer.batchDraw();
+}
+
+function extendStroke() {
+  if (!stroke) return;
+  const position = stage.getRelativePointerPosition();
+  if (!position) return;
+  const point = clampToImage(position);
+
+  if (stroke.tool === "brush") {
+    // 同一個像素上重複觸發不必記——那些點對筆畫沒有貢獻，
+    // 只會令送出去的圖形變大。
+    const last = stroke.points[stroke.points.length - 1];
+    if (Math.hypot(point.x - last.x, point.y - last.y) < 1) return;
+    stroke.points.push(point);
+    stroke.node.points(stroke.points.flatMap((p) => [p.x, p.y]));
+  } else {
+    stroke.points = [stroke.start, point];
+    stroke.node.setAttrs({
+      x: Math.min(stroke.start.x, point.x),
+      y: Math.min(stroke.start.y, point.y),
+      width: Math.abs(point.x - stroke.start.x),
+      height: Math.abs(point.y - stroke.start.y),
+    });
+  }
+  drawLayer.batchDraw();
+}
+
+function endStroke() {
+  if (!stroke) return;
+  const finished = stroke;
+  stroke = null;
+
+  if (finished.tool === "box") {
+    const [a, b] = finished.points;
+    // 只是點一下而沒有拉——當作沒發生，不要送出一個空的框。
+    if (Math.abs(a.x - b.x) < 4 || Math.abs(a.y - b.y) < 4) {
+      finished.node.destroy();
+      drawLayer.batchDraw();
+      return;
+    }
+  }
+
+  // 圖形要留到伺服器回覆為止，否則那一筆會先消失再重新出現——
+  // 在 42 MP 的圖上那中間有一兩秒，看起來像被吃掉了。
+  strokeNodes.push(finished.node);
+  queueMask(() => commitStroke(finished));
+}
+
+function strokeToDataURL(points, size) {
+  // 白線黑底，交給伺服器時就只有「塗到 / 沒塗到」兩種。
+  const canvas = document.createElement("canvas");
+  canvas.width = previewSize.width;
+  canvas.height = previewSize.height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#fff";
+  context.strokeStyle = "#fff";
+  context.lineWidth = size;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  if (points.length === 1) {
+    // 單點：畫一個圓。只按一下不拖也應該留下一個點。
+    context.beginPath();
+    context.arc(points[0].x, points[0].y, size / 2, 0, Math.PI * 2);
+    context.fill();
+  } else {
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    context.stroke();
+  }
+  return canvas.toDataURL("image/png");
+}
+
+function queueMask(work) {
+  maskQueue = maskQueue.then(work, work);
+  return maskQueue;
+}
+
+async function commitStroke(finished) {
+  const [a, b] = finished.points;
+  const body = finished.tool === "box"
+    ? { x0: a.x, y0: a.y, x1: b.x, y1: b.y, mode: finished.mode }
+    : { image: strokeToDataURL(finished.points, finished.size), mode: finished.mode };
+  const path = finished.tool === "box" ? "/api/mask/rect" : "/api/mask/stroke";
+
+  try {
+    const payload = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await rememberOverlay(payload);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    finished.node.destroy();
+    strokeNodes = strokeNodes.filter((node) => node !== finished.node);
+    drawLayer.batchDraw();
+  }
+}
+
+// 收到新的遮罩疊圖。**成品本身沒有變**——不需要清掉任何結果，
+// 只要把疊圖換掉、把數字更新。
+async function rememberOverlay(payload) {
+  maskOverlayURL = payload.overlay;
+  await setOverlay(maskOverlayURL);
+  updateMaskStat(payload);
+  // 放大時那一塊的紅色疊圖也變了（它是原檔解析度的），要重抓。
+  scheduleDetail();
 }
 
 function updateMaskStat(payload) {
@@ -345,9 +630,22 @@ function updateMaskStat(payload) {
     ? `已選取 ${pixels.toLocaleString()} 個像素`
     : "未選取任何東西";
   $("btn-apply").disabled = !pixels;
-  $("apply-hint").textContent = pixels
-    ? ($("prompt").value.trim() ? "會交給雲端模型" : "會用本機模型移除")
-    : "先選取一樣東西";
+  if (!pixels) {
+    $("apply-hint").textContent = "先選取一樣東西";
+    return;
+  }
+  if (!$("prompt").value.trim()) {
+    $("apply-hint").textContent = "會用本機模型移除";
+    return;
+  }
+  // ★ 雲端模型會把你框的**整個範圍**重畫。框一大片（例如用方框框住整個
+  // 人頭，連背景一起），背景就會被它用自己理解的內容蓋掉，成品上會出現
+  // 一個看得出來的方框——實測框內上排的背景被改了 +20 到 +66 級。
+  const area = (snapshot ? snapshot.width * snapshot.height : 0);
+  const tooBig = area > 0 && pixels > area * BIG_MASK_FRACTION;
+  $("apply-hint").textContent = tooBig
+    ? "會交給雲端模型——框很大，它會把整個框重畫"
+    : "會交給雲端模型";
 }
 
 // ── 流程 ────────────────────────────────────────────────────────
@@ -373,11 +671,27 @@ async function applyState(state) {
     : "";
   if (!state.opened) return;
 
-  const preview = await api("/api/preview");
-  await setPhoto(preview.image, { width: state.preview_width, height: state.preview_height });
+  // 換圖要把上一張的暫存狀態清掉，否則新圖會疊著舊圖的筆畫。
+  stroke = null;
+  strokeNodes = [];
+  panning = null;
+  sourceImageURL = null;
+  workingImageURL = null;
+  references = [];
+  renderReferences();
+  if (drawLayer) drawLayer.destroyChildren();
+  if (detailLayer) detailLayer.destroyChildren();
+  detail = null;
+
+  snapshot = state;
+  previewSize = { width: state.preview_width, height: state.preview_height };
+  // ★ 這是**開一張新圖**，只有這裡要重新 fit。其餘的 setView（切換檢視、
+  // 執行、復原、重做）都要留在原地，方便前後對比。
+  await setView("after", { refit: true });
   await setOverlay(null);
-  clearResult();
+  $("result-stat").textContent = "";
   updateMaskStat({ mask_pixels: 0 });
+  renderHistory();
 
   const banner = $("models-banner");
   const missing = [];
@@ -389,15 +703,39 @@ async function applyState(state) {
   } else {
     banner.hidden = true;
   }
+
+  // 專案掛不上時**一定要說出來**——默默不存檔是這裡唯一不能接受的失敗。
+  const save = $("save-banner");
+  if (state.project_note) {
+    save.textContent = state.project_note;
+    save.hidden = false;
+  } else if (!state.project_saved) {
+    save.textContent = "這次的修改不會被保存。";
+    save.hidden = false;
+  } else {
+    save.hidden = true;
+  }
 }
 
-function clearResult() {
-  resultImageURL = null;
-  viewingResult = false;
-  $("btn-export").disabled = true;
-  $("result-stat").textContent = "";
-  $("view-after").classList.remove("on");
-  $("view-before").classList.remove("on");
+// 介面上「有沒有東西可以看／可以退」全部由這一個函數決定，
+// 不散在各處各自判斷——那樣很容易出現按鈕看起來能用、按下去報錯的情況。
+function renderHistory() {
+  if (!snapshot) return;
+  const count = (snapshot.layers || []).length;
+  $("history-stat").textContent = count
+    ? `已修改 ${count} 處${snapshot.can_redo ? "（有可以重做的步驟）" : ""}`
+    : "還沒有修改";
+  $("btn-undo").disabled = !snapshot.can_undo;
+  $("btn-redo").disabled = !snapshot.can_redo;
+  $("btn-export").disabled = !snapshot.has_result;
+  $("view-before").disabled = false;
+  $("view-after").disabled = !snapshot.opened;
+}
+
+async function refreshState() {
+  snapshot = await api("/api/state");
+  renderHistory();
+  return snapshot;
 }
 
 async function loadModels() {
@@ -408,7 +746,9 @@ async function loadModels() {
     return;   // 拿不到清單不影響本機功能
   }
   const select = $("model");
+  modelInfo = {};
   for (const model of payload.models) {
+    modelInfo[model.id] = model;
     const option = document.createElement("option");
     option.value = model.id;
     const price = model.price != null ? `　$${model.price.toFixed(3)} 一張` : "";
@@ -417,6 +757,7 @@ async function loadModels() {
     option.textContent = `${model.name}${price}${resolution}`;
     select.appendChild(option);
   }
+  renderReferences();
   if (payload.note) {
     const option = document.createElement("option");
     option.disabled = true;
@@ -425,12 +766,105 @@ async function loadModels() {
   }
 }
 
+// ── 參考圖 ──────────────────────────────────────────────────────
+//
+// 使用者附的圖不會上傳，只是留在瀏覽器記憶體；按「執行」時才隨指令送出。
+// 送出前先在瀏覽器縮到伺服器會用的尺寸——原檔可能十幾 MB，
+// 直接 base64 上傳既慢又沒有意義（伺服器本來就會縮）。
+
+const REFERENCE_MAX_PX = 1536;
+
+function referenceLimit() {
+  const model = $("model").value;
+  if (!model) return 0;
+  const info = modelInfo[model];
+  // 送出的圖已經有一張是「標了紅色的選取範圍」，所以要扣一張。
+  return Math.max(0, (info && info.max_references ? info.max_references : 1) - 1);
+}
+
+function renderReferences() {
+  const list = $("reference-list");
+  list.textContent = "";
+  references.forEach((reference, index) => {
+    const box = document.createElement("div");
+    box.className = "thumb";
+    const image = document.createElement("img");
+    image.src = reference.dataURL;
+    image.alt = reference.name;
+    const remove = document.createElement("button");
+    remove.textContent = "×";
+    remove.title = "移除";
+    remove.onclick = () => {
+      references.splice(index, 1);
+      renderReferences();
+    };
+    box.append(image, remove);
+    list.appendChild(box);
+  });
+
+  const limit = referenceLimit();
+  const hint = $("reference-hint");
+  $("reference-group").classList.toggle("off", limit === 0);
+  hint.textContent = limit === 0
+    ? "選擇雲端模型之後才能用"
+    : `已加 ${references.length} 張，最多 ${limit} 張`;
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("讀不到這個檔案"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addReference(file) {
+  const limit = referenceLimit();
+  if (limit === 0) {
+    showError("參考圖只有雲端模型用得到——先在上面選一個模型。");
+    return;
+  }
+  if (references.length >= limit) {
+    showError(`這個模型最多可以附 ${limit} 張參考圖。`);
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    showError("參考圖必須是圖片檔。");
+    return;
+  }
+  try {
+    references.push({ name: file.name, dataURL: await shrinkToDataURL(file) });
+    renderReferences();
+    showError("");
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function shrinkToDataURL(file) {
+  const original = await loadKonvaImage(await readAsDataURL(file));
+  if (Math.max(original.width, original.height) <= REFERENCE_MAX_PX) {
+    return original.src;
+  }
+  const scale = REFERENCE_MAX_PX / Math.max(original.width, original.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(original.width * scale);
+  canvas.height = Math.round(original.height * scale);
+  canvas.getContext("2d").drawImage(original, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
 async function runApply() {
   const prompt = $("prompt").value.trim();
   const model = $("model").value;
 
   if (prompt && !model) {
     showError("要下指令的話，請在上面選一個雲端模型。留空就只是移除。");
+    return;
+  }
+  if (references.length && !model) {
+    showError("參考圖只有雲端模型用得到。");
     return;
   }
 
@@ -445,15 +879,22 @@ async function runApply() {
     const payload = await api("/api/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, model: model || null }),
+      body: JSON.stringify({
+      prompt,
+      model: model || null,
+      references: references.map((reference) => reference.dataURL),
+    }),
     });
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
-    resultImageURL = payload.image;
-    $("btn-export").disabled = false;
+    workingImageURL = null;   // 成品變了，快取要失效
+    await refreshState();
     const how = model ? "雲端模型" : "本機模型";
     $("result-stat").textContent =
-      `完成（${how}，用時 ${seconds} 秒）。選取範圍以外完全沒有改動。`;
-    await showAfter();
+      `完成（${how}，用時 ${seconds} 秒）。圈選範圍以外完全沒有改動。`;
+    await setView("after");
+    await setOverlay(null);   // 遮罩已經清空
+    maskOverlayURL = null;
+    updateMaskStat({ mask_pixels: 0 });
   } catch (error) {
     showError(error.message);
   } finally {
@@ -461,22 +902,157 @@ async function runApply() {
   }
 }
 
-async function showAfter() {
-  if (!resultImageURL) return;
-  viewingResult = true;
-  await setPhoto(resultImageURL, previewSize);
-  $("view-after").classList.add("on");
-  $("view-before").classList.remove("on");
-  if (maskOverlayURL) await setOverlay(null);
+// ── 復原與重做 ──────────────────────────────────────────────────
+//
+// 伺服器是唯一的真相來源：這裡只負責把結果拿回來重畫。
+// 遮罩的處理是刻意不對稱的——復原會把當初圈的範圍放回來
+// （方便改一改再試一次），重做則清空（與當初執行時一致）。
+
+async function runUndoRedo(path, busyText) {
+  showError("");
+  showBusy(busyText);
+  try {
+    const state = await api(path, { method: "POST" });
+    snapshot = state;
+    workingImageURL = null;
+    maskOverlayURL = state.overlay;
+    updateMaskStat(state);
+    renderHistory();
+    $("result-stat").textContent = "";
+    await setView("after");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideBusy();
+  }
 }
 
-async function showBefore() {
-  const preview = await api("/api/preview");
-  viewingResult = false;
-  await setPhoto(preview.image, previewSize);
-  $("view-before").classList.add("on");
-  $("view-after").classList.remove("on");
-  if (maskOverlayURL) await setOverlay(maskOverlayURL);
+// ── 放大時的原檔細節 ────────────────────────────────────────────
+//
+// 畫布上的影像是預覽（最長邊 1600）。放大超過預覽本身的密度之後，
+// 看到的其實是縮圖被拉大——實測高頻細節只剩一半。對一個修圖工具來說
+// 那是致命的：**你沒辦法判斷自己修的品質。**
+//
+// 所以放大時改為向伺服器要「這一塊的原檔像素，縮到螢幕要的大小」。
+// 關鍵是**由原檔重新取樣**，而不是送原解析度那一塊——
+// 送原解析度的話，放大 1.2 倍就要傳 8 MP，而螢幕根本顯示不了那麼多。
+
+const DETAIL_ZOOM = 1.05;   // 超過這個倍率就是在放大預覽，改用原檔細節
+
+// 選取佔整張圖多少比例算「框很大」。雲端模型會重畫整個框，
+// 超過這個比例就值得提醒一次。
+const BIG_MASK_FRACTION = 0.05;
+
+async function loadDetail() {
+  if (!snapshot || !snapshot.opened || !previewSize.width) return;
+  const scale = stage.scaleX();
+  if (scale <= DETAIL_ZOOM) {
+    clearDetail();
+    return;
+  }
+
+  const area = $("stage-area");
+  // 可見範圍，預覽座標（畫布的座標系就是預覽像素）
+  const previewScale = previewSize.width / snapshot.width;
+  const left = Math.max(0, (0 - stage.x()) / scale);
+  const top = Math.max(0, (0 - stage.y()) / scale);
+  const right = Math.min(previewSize.width, (area.clientWidth - stage.x()) / scale);
+  const bottom = Math.min(previewSize.height, (area.clientHeight - stage.y()) / scale);
+  if (right - left < 8 || bottom - top < 8) {
+    clearDetail();
+    return;
+  }
+
+  // 換到原圖座標——與伺服器的 _decode_mask_png 是同一個方向、同一個比例。
+  const x0 = Math.floor(left / previewScale);
+  const y0 = Math.floor(top / previewScale);
+  const x1 = Math.ceil(right / previewScale);
+  const y1 = Math.ceil(bottom / previewScale);
+  const w = Math.round((x1 - x0) * previewScale * scale);
+  const h = Math.round((y1 - y0) * previewScale * scale);
+  const variant = view === "before" ? "&source=true" : "";
+  const key = `${x0},${y0},${x1},${y1},${w},${h}${variant}`;
+  if (detail && detail.key === key) return;
+
+  try {
+    const payload = await api(
+      `/api/detail?x0=${x0}&y0=${y0}&x1=${x1}&y1=${y1}&w=${w}&h=${h}${variant}`
+    );
+    await showDetail(payload, key);
+  } catch (error) {
+    // 抓不到細節不應該蓋掉整個畫面——留著預覽繼續用就好。
+    console.warn("細節載入失敗", error);
+  }
+}
+
+async function showDetail(payload, key) {
+  clearDetail();
+  const image = await loadKonvaImage(payload.image);
+  const overlay = await loadKonvaImage(payload.overlay);
+  const previewScale = previewSize.width / snapshot.width;
+  const box = {
+    x: payload.x * previewScale,
+    y: payload.y * previewScale,
+    width: payload.width * previewScale,
+    height: payload.height * previewScale,
+  };
+  detail = {
+    key,
+    node: new Konva.Image({ image, ...box, listening: false }),
+    overlayNode: new Konva.Image({ image: overlay, ...box, listening: false }),
+  };
+  detailLayer.add(detail.node);
+  detailLayer.add(detail.overlayNode);
+  detailLayer.batchDraw();
+  // 預覽那層的紅色疊圖要收起來，否則兩層疊在一起紅色會變深。
+  if (maskImage) maskImage.visible(false);
+  maskLayer.batchDraw();
+}
+
+function clearDetail() {
+  if (!detail) return;
+  detail.node.destroy();
+  detail.overlayNode.destroy();
+  detail = null;
+  detailLayer.destroyChildren();
+  detailLayer.batchDraw();
+  if (maskImage) maskImage.visible(true);
+  maskLayer.batchDraw();
+}
+
+function scheduleDetail() {
+  clearTimeout(detailTimer);
+  detailTimer = setTimeout(loadDetail, 150);
+}
+
+// ── 畫面切換 ────────────────────────────────────────────────────
+//
+// 遮罩疊圖**兩個檢視都顯示**。這樣「看成品」的時候也可以直接接著圈下一處，
+// 不必先切回原圖——而多步編輯正是要不斷接著圈。
+
+async function previewURL(kind) {
+  if (kind === "source") {
+    if (!sourceImageURL) sourceImageURL = (await api("/api/preview?source=true")).image;
+    return sourceImageURL;
+  }
+  if (!workingImageURL) workingImageURL = (await api("/api/preview")).image;
+  return workingImageURL;
+}
+
+async function setView(next, { refit = false } = {}) {
+  if (!snapshot || !snapshot.opened) return;
+  view = next;
+  $("view-before").classList.toggle("on", next === "before");
+  $("view-after").classList.toggle("on", next === "after");
+  await setPhoto(
+    await previewURL(next === "before" ? "source" : "working"),
+    previewSize,
+    { refit }
+  );
+  await setOverlay(maskOverlayURL);
+  // 換了檢視，畫面上那一塊的內容也換了——細節要重抓。
+  clearDetail();
+  scheduleDetail();
 }
 
 // ── 事件綁定 ────────────────────────────────────────────────────
@@ -498,21 +1074,52 @@ function bind() {
     if (event.dataTransfer.files[0]) openFile(event.dataTransfer.files[0]);
   });
 
-  $("tool-add").onclick = () => setTool("add");
-  $("tool-sub").onclick = () => setTool("subtract");
+  $("tool-brush").onclick = () => setTool("brush");
+  $("tool-box").onclick = () => setTool("box");
+  $("tool-auto").onclick = () => setTool("auto");
+  $("zoom-in").onclick = () => zoomBy(1.25);
+  $("zoom-out").onclick = () => zoomBy(1 / 1.25);
+  $("zoom-value").onclick = zoomToOriginal;
+  $("mode-add").onclick = () => setMode("add");
+  $("mode-sub").onclick = () => setMode("subtract");
+  $("brush-size").oninput = (event) => {
+    brushSize = Number(event.target.value);
+    $("brush-size-value").textContent = String(brushSize);
+  };
+  // 在照片外面放手也要收筆——不然那一筆會卡住，之後滑鼠動一動
+  // 就會從舊的起點繼續長長一條線出來。
+  window.addEventListener("mouseup", endPointer);
+  window.addEventListener("touchend", endPointer);
+
+  $("model").onchange = renderReferences;
+  $("reference-input").onchange = async (event) => {
+    for (const file of Array.from(event.target.files)) {
+      await addReference(file);
+    }
+    event.target.value = "";
+  };
+
   $("btn-clear").onclick = async () => {
     if (!stage || $("drop").hidden === false) return;
     const payload = await api("/api/clear_mask", { method: "POST" });
-    await setOverlay(payload.overlay);
-    updateMaskStat(payload);
-    clearResult();
+    await rememberOverlay(payload);
   };
 
   $("btn-apply").onclick = runApply;
-  $("view-before").onclick = showBefore;
-  $("view-after").onclick = showAfter;
+  $("view-before").onclick = () => setView("before");
+  $("view-after").onclick = () => setView("after");
+  $("btn-undo").onclick = () => runUndoRedo("/api/undo", "復原中…");
+  $("btn-redo").onclick = () => runUndoRedo("/api/redo", "重做中…");
   $("btn-fit").onclick = fitToWindow;
-  $("btn-export").onclick = () => { window.location.href = "/api/result"; };
+  $("btn-export").onclick = () => {
+    window.location.href = `/api/result?format=${$("export-format").value}`;
+  };
+  $("export-format").onchange = () => {
+    // 講清楚差別，不要讓「檔案小」與「不失真」看起來只是兩個隨機選項。
+    $("export-hint").textContent = $("export-format").value === "png"
+      ? "PNG 完全不失真，但照片存起來會很大（可能比原檔大幾倍）。"
+      : "WebP 存照片比 PNG 小得多，而且肉眼看不出差別。";
+  };
 
   $("btn-settings").onclick = async () => {
     const settings = await api("/api/settings");
@@ -530,10 +1137,131 @@ function bind() {
   };
 }
 
+const TOOL_HINTS = {
+  brush: "用筆刷在照片上拖曳，塗出想改的範圍。",
+  box: "在照片上拉一個矩形，框住想改的地方。",
+  auto: "在物件上按一下，讓 AI 判斷那件東西的範圍。",
+};
+
 function setTool(next) {
   tool = next;
-  $("tool-add").classList.toggle("on", next === "add");
-  $("tool-sub").classList.toggle("on", next === "subtract");
+  $("tool-brush").classList.toggle("on", next === "brush");
+  $("tool-box").classList.toggle("on", next === "box");
+  $("tool-auto").classList.toggle("on", next === "auto");
+  $("brush-row").classList.toggle("dim", next !== "brush");
+  $("tool-hint").textContent = TOOL_HINTS[next];
+  updateCursor();
+}
+
+function setMode(next) {
+  mode = next;
+  $("mode-add").classList.toggle("on", next === "add");
+  $("mode-sub").classList.toggle("on", next === "subtract");
+}
+
+function onPointerDown(event) {
+  if (!photoImage) return;
+
+  // 移動：**中鍵**。不佔一個工具按鈕——平移是隨時要用的動作，
+  // 不應該逼使用者在「畫」與「移動」之間切來切去。
+  //
+  // ⚠️ 一開始用右鍵，但**右鍵在瀏覽器裡不可靠**（選單、拖放、
+  // 系統手勢都會來搶），使用者實測「右鍵移動不行」。中鍵沒有這些問題。
+  //
+  // 自己實作而不是用 Konva 的拖曳：不必猜 Konva 的內部狀態，
+  // 而且我們本來就需要一個「視野變了」的鉤子去重抓放大時的細節。
+  const button = event && event.evt ? event.evt.button : 0;
+  if (button === 1) {
+    // 中鍵按下去會觸發瀏覽器的自動捲動，要擋掉。
+    if (event.evt.cancelable) event.evt.preventDefault();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    panning = { x: pointer.x, y: pointer.y, stageX: stage.x(), stageY: stage.y() };
+    updateCursor();
+    return;
+  }
+
+  if (tool === "auto") return;
+
+  // ★ 一定要**由照片內**起筆。用 clampToImage 的話，在照片外拖曳會被
+  // 夾到最近的邊緣照樣畫——實測那樣會沿著邊緣畫出一條 34,145 像素的筆畫，
+  // 而使用者的意思其實是「我要移動畫面」。
+  const position = pointerToImage();
+  if (!position) return;
+  showError("");
+  beginStroke(position);
+}
+
+function movePointer() {
+  if (panning) {
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    stage.position({
+      x: panning.stageX + (pointer.x - panning.x),
+      y: panning.stageY + (pointer.y - panning.y),
+    });
+    stage.batchDraw();
+    return;
+  }
+  extendStroke();
+}
+
+function endPointer() {
+  if (panning) {
+    panning = null;
+    updateCursor();
+    scheduleDetail();
+    return;
+  }
+  endStroke();
+}
+
+function updateCursor() {
+  const wrap = $("stage-wrap");
+  wrap.classList.toggle("grabbing", panning !== null);
+  wrap.classList.toggle("draw", tool !== "auto");
+}
+
+// ── 縮放 ────────────────────────────────────────────────────────
+//
+// 百分比是**相對原圖**的：100% ＝ 原圖一個像素對螢幕一個像素。
+// 不是相對預覽——那才是使用者心裡的那個數字，而且有了 /api/detail
+// 之後 100% 是真的做得到（畫面會改由原檔取樣）。
+
+function previewScale() {
+  if (!snapshot || !snapshot.width || !previewSize.width) return 1;
+  return previewSize.width / snapshot.width;
+}
+
+function zoomPercent() {
+  return stage ? stage.scaleX() * previewScale() * 100 : 100;
+}
+
+function updateZoomLabel() {
+  if (!stage) return;
+  // 小數不要露出來，但 100% 要說 100%。
+  const percent = zoomPercent();
+  const text = percent >= 10 ? Math.round(percent) : percent.toFixed(1);
+  $("zoom-value").textContent = `${text}%`;
+}
+
+function zoomBy(factor, anchor) {
+  if (!photoImage) return;
+  const area = $("stage-area");
+  // 以畫布中央為錨點——按鈕不像滾輪那樣有一個自然的指標位置。
+  const point = anchor || { x: area.clientWidth / 2, y: area.clientHeight / 2 };
+  const old = stage.scaleX();
+  const next = Math.max(0.05, Math.min(20, old * factor));
+  const origin = { x: (point.x - stage.x()) / old, y: (point.y - stage.y()) / old };
+  stage.scale({ x: next, y: next });
+  stage.position({ x: point.x - origin.x * next, y: point.y - origin.y * next });
+  stage.batchDraw();
+  updateZoomLabel();
+  scheduleDetail();
+}
+
+function zoomToOriginal() {
+  zoomBy(1 / (stage.scaleX() * previewScale()));
 }
 
 async function main() {
@@ -546,7 +1274,13 @@ async function main() {
 
   try {
     buildStage();
-    stage.on("click tap", () => { if (photoImage && !viewingResult) clickSelect(); });
+    stage.on("mousedown touchstart", onPointerDown);
+    stage.on("mousemove touchmove", movePointer);
+    stage.on("mouseup touchend", endPointer);
+    // 「自動」只在按一下的時候作用；筆刷與方框走上面的拖曳事件。
+    stage.on("click tap", () => { if (tool === "auto") clickSelect(); });
+    setTool(tool);
+    setMode(mode);
   } catch (error) {
     showError(`畫布建立失敗：${error.message}。請重新載入頁面。`);
     return;

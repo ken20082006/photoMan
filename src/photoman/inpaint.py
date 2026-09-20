@@ -15,6 +15,7 @@ API 只保留給本地做得不好的情況：大面積、複雜材質、
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -154,11 +155,14 @@ class ApiInpainter:
         resolution: str | None = None,
         client=None,
         show_selection: bool = True,
+        references: Sequence[np.ndarray] = (),
     ) -> None:
         self.model = model
         self.prompt = prompt
         self.resolution = resolution
         self.show_selection = show_selection
+        # 使用者另外給的參考圖，接在主要那張之後（順序即指令裡的「第幾張」）。
+        self.references = list(references)
         self._client = client
         self.last_cost: float | None = None
         self.last_seconds: float | None = None
@@ -181,16 +185,28 @@ class ApiInpainter:
         if not binary.any():
             return image.copy()
 
-        references = [image]
         instruction = self.prompt.strip()
+        # 送出的圖：第一張是裁切圖，第二張（如果有）是標了紅色的選取範圍，
+        # 之後才是使用者給的參考圖。指令裡要按這個順序講清楚——
+        # 模型只看到一串圖，不知道哪一張是甚麼。
+        extra: list[np.ndarray] = []
         if self.show_selection:
-            references.append(_highlight(image, binary))
+            extra.append(_highlight(image, binary))
             instruction = (
                 f"{instruction}\n\n"
                 "The second image marks the area to change with a red tint. "
                 "Only change what is inside the marked area. "
                 "Leave everything outside the marked area exactly as it is."
             )
+        if self.references:
+            first = 3 if self.show_selection else 2
+            instruction += (
+                f"\n\nThe images from the {_ordinal(first)} onward are references "
+                "provided by the user. Use their content as instructed above "
+                "(for example, insert the object they show into the marked area), "
+                "but do not copy them wholesale into the photo."
+            )
+        extra += self.references
 
         try:
             response = self._client_or_default().edit(
@@ -198,6 +214,7 @@ class ApiInpainter:
                 instruction,
                 model=self.model,
                 resolution=self.resolution,
+                references=extra,
             )
         except ProviderError:
             raise
@@ -207,6 +224,15 @@ class ApiInpainter:
         self.last_cost = response.cost_usd
         self.last_seconds = response.seconds
         return response.image
+
+
+def _ordinal(number: int) -> str:
+    """ "2nd"、"3rd"……指令是英文的，所以要英文的序數。"""
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
 
 
 def _highlight(image: np.ndarray, mask: np.ndarray, alpha: float = 0.45) -> np.ndarray:
@@ -241,6 +267,5 @@ def get_inpainter(method: str, **options) -> Inpainter:
             raise ValueError("api: 後面要接模型代號，例如 api:bytedance-seed/seedream-5-0-lite")
         return ApiInpainter(model=model, **options)
     raise ValueError(
-        f"未知的 inpainting 方法：{method}\n"
-        "支援 telea、ns、lama，以及 api:<model-id>。"
+        f"未知的 inpainting 方法：{method}\n支援 telea、ns、lama，以及 api:<model-id>。"
     )

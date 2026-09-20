@@ -115,6 +115,19 @@ class TestContractEnforcement:
         with pytest.raises(ValueError, match="遮罩是空的"):
             apply_generative_edit(_base(), np.zeros((160, 200), dtype=bool))
 
+    def test_a_mask_too_small_to_survive_is_explained(self) -> None:
+        """★ 前處理會移除小於 64 像素的連通塊（清分割模型的零星小塊）。
+
+        副作用是使用者用細筆刷**點一下**（粗細 6 的面積是 28 像素）會被
+        整塊清掉。那時說「遮罩是空的，無法規劃裁切框」完全對不上——
+        使用者明明畫了東西。要說出真正的原因。
+        """
+        mask = np.zeros((160, 200), dtype=bool)
+        mask[80:85, 90:95] = True  # 25 像素
+
+        with pytest.raises(ValueError, match="選取的範圍太小了"):
+            apply_generative_edit(_base(), mask)
+
     def test_float_base_is_rejected(self) -> None:
         """底圖必須是 uint8 sRGB——收到 float 代表呼叫方搞錯了工作空間。"""
         with pytest.raises(ValueError, match="uint8"):
@@ -130,6 +143,25 @@ class TestContractEnforcement:
 
 
 class TestResult:
+    def test_the_patch_reproduces_the_image(self) -> None:
+        """★ ``EditResult.patch`` 是重播的原料。
+
+        把貼片與 alpha 貼回底圖，必須得到**完全相同**的圖層。
+        這一條不成立的話，復原與重做會悄悄地改變畫面。
+
+        （跨 session 的完整重播測試在 tests/test_layers.py。）
+        """
+        from photoman.composite import composite_patch_into_bytes
+
+        base = _base()
+        mask = _mask()
+        result = apply_generative_edit(base, mask, method="telea")
+
+        _, alpha = prepare_masks(mask)
+        rebuilt = composite_patch_into_bytes(base, result.patch, result.crop, alpha)
+
+        assert np.array_equal(rebuilt, result.image)
+
     def test_records_the_geometry(self) -> None:
         result = apply_generative_edit(_base(), _mask(), method="telea")
 

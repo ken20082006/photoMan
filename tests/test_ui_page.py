@@ -143,14 +143,14 @@ class TestManualSelectionTools:
         塗抹這種直接操作的動作上是不能接受的，使用者會以為滑鼠壞了。
         """
         assert 'stage.on("mousedown touchstart", onPointerDown)' in js
-        assert 'stage.on("mousemove touchmove", extendStroke)' in js
-        assert 'stage.on("mouseup touchend", endStroke)' in js
+        assert 'stage.on("mousemove touchmove", movePointer)' in js
+        assert 'stage.on("mouseup touchend", endPointer)' in js
         assert "/api/mask/stroke" in js and "/api/mask/rect" in js
 
     def test_releasing_outside_the_canvas_ends_the_stroke(self, js: str) -> None:
         """在照片外面放手也要收筆，否則那一筆會卡住，之後滑鼠一動
         就會由舊的起點長出一條長線。"""
-        assert 'window.addEventListener("mouseup", endStroke)' in js
+        assert 'window.addEventListener("mouseup", endPointer)' in js
 
     def test_automatic_selection_only_runs_on_a_click(self, js: str) -> None:
         """筆刷與方框是拖曳的，拖曳結束的 click 不可以又叫一次 SAM。"""
@@ -192,6 +192,142 @@ class TestHistoryControls:
         view = re.search(r"async function setView\(next\) \{(.*?)\n\}", js, re.S).group(1)
 
         assert "setOverlay(maskOverlayURL)" in view
+
+
+class TestPanAndZoomDetail:
+    """拖曳與放大。兩個都是實測到的缺口。"""
+
+    def test_panning_is_on_the_right_button_not_a_tool(self, js: str) -> None:
+        """★ 平移**不佔一個工具按鈕**——它是隨時要用的動作，
+        不應該逼使用者在「畫」與「移動」之間切來切去。"""
+        assert "button === 2" in js, "右鍵要可以拖曳畫面"
+        assert "button === 1" in js, "中鍵也保留"
+        assert 'id="tool-move"' not in js
+
+    def test_the_browser_menu_is_suppressed_on_the_canvas(self, js: str) -> None:
+        """右鍵用來拖曳，就不可以彈出選單。"""
+        assert "contextmenu" in js
+        assert "preventDefault" in js.split("contextmenu")[1][:120]
+
+    def test_panning_is_implemented_by_hand(self, js: str) -> None:
+        """自己實作而不用 Konva 的 drag——不必猜 Konva 的內部狀態，
+        而且我們需要一個「視野變了」的鉤子去重抓細節。"""
+        assert "let panning = null" in js
+        assert "panning.stageX +" in js
+
+    def test_there_is_a_zoom_bar_above_the_canvas(self, html: str) -> None:
+        """像市面上的修圖工具：縮放比例與按鈕放在畫布上方。"""
+        area = re.search(r'<div id="stage-area">(.*?)\n  </div>', html, re.S).group(1)
+        assert 'id="zoom-bar"' in area, "縮放列要在畫布那一區裡"
+        for element_id in ("zoom-out", "zoom-in", "zoom-value", "btn-fit"):
+            assert re.search(rf'id="{element_id}"', area), f"缺少 {element_id}"
+
+    def test_the_percentage_is_relative_to_the_original(self, js: str) -> None:
+        """100% ＝ 原圖一個像素對螢幕一個像素。
+
+        不是相對預覽——那才是使用者心裡的那個數字，而且有了 /api/detail
+        之後 100% 是真的做得到。
+        """
+        body = re.search(r"function zoomPercent\(\) \{(.*?)\n\}", js, re.S).group(1)
+        assert "previewScale()" in body
+        assert "zoomToOriginal" in js
+
+    def test_the_label_follows_every_zoom(self, js: str) -> None:
+        """滾輪、按鈕、適合視窗、開圖——每一個都要更新那個數字。"""
+        zoom = re.search(r"function zoomBy\(factor, anchor\) \{(.*?)\n\}", js, re.S).group(1)
+        assert "updateZoomLabel()" in zoom
+        fit = re.search(r"function fitToWindow\(\) \{(.*?)\n\}", js, re.S).group(1)
+        assert "updateZoomLabel()" in fit
+
+    def test_a_stroke_cannot_start_outside_the_photo(self, js: str) -> None:
+        """★ 實測：在照片外拖曳會沿著邊緣畫出 34,145 個像素，
+        因為 beginStroke 用了 clampToImage——那會把界外的點夾到邊緣。"""
+        body = re.search(r"function onPointerDown\(event\) \{(.*?)\n\}", js, re.S).group(1)
+        # 去掉註解——不然會匹配到註解裡提到的函數名，而不是真正的呼叫。
+        # （上面 TestBindOrder 就是這樣誤報過的。）
+        code = "\n".join(line for line in body.splitlines() if not line.strip().startswith("//"))
+
+        assert "pointerToImage()" in code
+        assert "clampToImage" not in code, "起筆要用 pointerToImage，界外要整個放棄"
+
+    def test_the_detail_layer_exists_and_is_above_the_mask(self, js: str) -> None:
+        """放大時的原檔細節要蓋過預覽與它的疊圖，但在筆畫之下。"""
+        build = re.search(r"function buildStage\(\) \{(.*?)\n\}", js, re.S).group(1)
+        order = [
+            build.index(name)
+            for name in (
+                "stage.add(imageLayer)",
+                "stage.add(maskLayer)",
+                "stage.add(detailLayer)",
+                "stage.add(drawLayer)",
+            )
+        ]
+
+        assert order == sorted(order)
+
+    def test_detail_is_only_fetched_when_magnifying(self, js: str) -> None:
+        assert "DETAIL_ZOOM" in js
+        assert "/api/detail?" in js
+        body = re.search(r"async function loadDetail\(\) \{(.*?)\n\}", js, re.S).group(1)
+        assert "scale <= DETAIL_ZOOM" in body, "縮小時不應該抓細節"
+
+    def test_the_detail_replaces_the_preview_overlay(self, js: str) -> None:
+        """兩層疊圖同時顯示的話，紅色會變深。"""
+        body = re.search(r"async function showDetail\((.*?)\n\}", js, re.S).group(1)
+        assert "maskImage.visible(false)" in body
+
+    def test_the_detail_request_is_debounced(self, js: str) -> None:
+        """滾輪會連續觸發——不 debounce 的話每個事件都送一次請求。"""
+        assert "function scheduleDetail()" in js
+        assert "setTimeout(loadDetail" in js
+
+
+class TestReferenceImages:
+    def test_the_control_exists(self, html: str) -> None:
+        assert re.search(r'id="reference-input"', html)
+        assert re.search(r'id="reference-list"', html)
+        assert re.search(r'<label[^>]+for="reference-input"', html), (
+            "要用 label 觸發原生檔案選擇，與「選擇照片」同一個理由"
+        )
+
+    def test_they_are_sent_with_the_apply_request(self, js: str) -> None:
+        assert "references: references.map" in js
+
+    def test_the_limit_comes_from_the_model(self, js: str) -> None:
+        """送出的圖已經有一張是紅色標示，所以要扣一張。"""
+        assert "function referenceLimit()" in js
+        assert "max_references" in js
+
+    def test_they_are_shrunk_in_the_browser_first(self, js: str) -> None:
+        """原檔可能十幾 MB，直接 base64 上傳既慢又沒有意義。"""
+        assert "REFERENCE_MAX_PX" in js
+        assert "function shrinkToDataURL" in js
+
+    def test_local_removal_refuses_references(self, js: str) -> None:
+        assert "參考圖只有雲端模型用得到" in js
+
+
+class TestExportFormat:
+    def test_there_is_a_format_choice(self, html: str) -> None:
+        assert re.search(r'id="export-format"', html)
+        assert "webp" in html and "png" in html
+
+    def test_the_choice_is_sent_to_the_server(self, js: str) -> None:
+        assert "/api/result?format=" in js
+
+    def test_the_difference_is_explained(self, html: str, js: str) -> None:
+        """不要讓「檔案小」與「不失真」看起來只是兩個隨機選項。"""
+        assert "完全不失真" in html, "選項的文字本身就要講清楚"
+        assert '$("export-hint").textContent' in js, "換格式時也要跟著說明改變"
+
+
+class TestWarningBanner:
+    def test_there_is_somewhere_to_show_the_warning(self, html: str) -> None:
+        assert re.search(r'id="warning-banner"', html)
+
+    def test_the_warning_is_shown_after_an_edit(self, js: str) -> None:
+        assert "function showWarning(" in js
+        assert "showWarning(payload.warning)" in js
 
 
 class TestOfflinePromise:

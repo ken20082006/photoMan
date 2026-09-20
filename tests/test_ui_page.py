@@ -189,7 +189,9 @@ class TestHistoryControls:
         """看成品時也要看到遮罩——多步編輯是接著圈下一處，
         不應該強迫使用者先切回原圖。
         """
-        view = re.search(r"async function setView\(next\) \{(.*?)\n\}", js, re.S).group(1)
+        view = re.search(
+            r"async function setView\(next, \{ refit = false \} = \{\}\) \{(.*?)\n\}", js, re.S
+        ).group(1)
 
         assert "setOverlay(maskOverlayURL)" in view
 
@@ -235,6 +237,25 @@ class TestPanAndZoomDetail:
         body = re.search(r"function zoomPercent\(\) \{(.*?)\n\}", js, re.S).group(1)
         assert "previewScale()" in body
         assert "zoomToOriginal" in js
+
+    def test_switching_the_view_keeps_the_zoom_and_position(self, js: str) -> None:
+        """★ 看原圖／看成品切換時要留在原地。
+
+        先前 `setPhoto` **每一次**都呼叫 `fitToWindow()`，所以一切換就被
+        重設縮放與位置——而那正是使用者要對比的時候。
+        """
+        body = re.search(
+            r"async function setPhoto\(url, size, \{ refit = false \} = \{\}\) \{(.*?)\n\}",
+            js,
+            re.S,
+        ).group(1)
+
+        assert "if (refit) fitToWindow()" in body, "只有明示要 refit 才重新 fit"
+        assert not re.search(r"^\s*fitToWindow\(\);", body, re.M), "不可以無條件 fit"
+
+        # 只有「開一張新圖」要 refit——切換檢視、執行、復原、重做都要留在原地
+        app = re.search(r"async function applyState\(state\) \{(.*?)\n\}", js, re.S).group(1)
+        assert 'setView("after", { refit: true })' in app
 
     def test_the_label_follows_every_zoom(self, js: str) -> None:
         """滾輪、按鈕、適合視窗、開圖——每一個都要更新那個數字。"""

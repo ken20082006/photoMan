@@ -261,6 +261,14 @@ PNG 比原檔大 3.4 倍——存照片用 PNG 本來就是浪費。
 **自己實作平移而不用 Konva 的 drag**——不必猜 Konva 的內部狀態，
 而且我們本來就需要一個「視野變了」的鉤子去重抓放大時的細節。
 
+**切換「看原圖／看成品」要留在原地。** 先前 `setPhoto` **每一次**都呼叫
+`fitToWindow()`，所以一切換就把縮放與位置重設——而那正是使用者要對比的
+時候。現在只有**開一張新圖**才重新 fit（由呼叫方明示 `{ refit: true }`）。
+
+⚠️ 第一版用「尺寸有沒有變」判斷，**完全沒有效**：呼叫方傳進來的 `size`
+就是目前的 `previewSize`，所以那個比較永遠是「沒變」——結果開新圖時
+完全不 fit。是瀏覽器檢查抓到的。
+
 **縮放列放在畫布左上方**（與市面上的修圖工具一樣）：`− 100% ＋ 適合視窗`。
 按百分比回到 100%——**那個百分比是相對原圖的**，不是相對預覽。
 有了 `/api/detail` 之後 100% 是真的做得到。
@@ -387,7 +395,7 @@ curl -L -o models/inpainting_lama.onnx `
 
 ```powershell
 cd C:\photoMan
-.\.venv\Scripts\python.exe -m pytest -q     # 應顯示 251 passed
+.\.venv\Scripts\python.exe -m pytest -q     # 應顯示 252 passed
 ```
 
 **PATH 上的 `python` 是 3.9，不是 3.12。** 所有指令一律用

@@ -406,13 +406,25 @@ function loadKonvaImage(url) {
   });
 }
 
-async function setPhoto(url, size) {
+async function setPhoto(url, size, { refit = false } = {}) {
+  // ★ **重新 fit 要由呼叫方明示，不是每次都做。**
+  //
+  // 先前每一次都 fit，所以「看原圖／看成品」一切換，縮放與位置就被重設
+  // ——而那正是使用者要對比的時候，重新對準一次很煩。切換檢視、執行、
+  // 復原、重做，位置都該留著；只有**開一張新圖**才重新 fit。
+  //
+  // ⚠️ 不要用「尺寸有沒有變」判斷：呼叫方傳進來的 `size` 就是目前的
+  // `previewSize`，所以那個比較永遠是「沒變」——第一版就是這樣寫的，
+  // 結果開新圖時完全不 fit（瀏覽器檢查抓到）。
   previewSize = size;
+
   const image = await loadKonvaImage(url);
   imageLayer.destroyChildren();
   photoImage = new Konva.Image({ image, x: 0, y: 0, width: size.width, height: size.height });
   imageLayer.add(photoImage);
-  fitToWindow();
+
+  if (refit) fitToWindow();
+  else stage.batchDraw();
 }
 
 async function setOverlay(url) {
@@ -673,7 +685,9 @@ async function applyState(state) {
 
   snapshot = state;
   previewSize = { width: state.preview_width, height: state.preview_height };
-  await setView("after");
+  // ★ 這是**開一張新圖**，只有這裡要重新 fit。其餘的 setView（切換檢視、
+  // 執行、復原、重做）都要留在原地，方便前後對比。
+  await setView("after", { refit: true });
   await setOverlay(null);
   $("result-stat").textContent = "";
   updateMaskStat({ mask_pixels: 0 });
@@ -1025,12 +1039,16 @@ async function previewURL(kind) {
   return workingImageURL;
 }
 
-async function setView(next) {
+async function setView(next, { refit = false } = {}) {
   if (!snapshot || !snapshot.opened) return;
   view = next;
   $("view-before").classList.toggle("on", next === "before");
   $("view-after").classList.toggle("on", next === "after");
-  await setPhoto(await previewURL(next === "before" ? "source" : "working"), previewSize);
+  await setPhoto(
+    await previewURL(next === "before" ? "source" : "working"),
+    previewSize,
+    { refit }
+  );
   await setOverlay(maskOverlayURL);
   // 換了檢視，畫面上那一塊的內容也換了——細節要重抓。
   clearDetail();

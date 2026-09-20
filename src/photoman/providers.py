@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,14 +74,11 @@ class OpenRouterClient:
     def __init__(self, api_key: str, *, base_url: str = DEFAULT_BASE_URL) -> None:
         if not api_key:
             raise ProviderError(
-                "尚未設定 API key。在介面的「設定」填入，或改用本機的移除功能"
-                "（那個不需要 key）。"
+                "尚未設定 API key。在介面的「設定」填入，或改用本機的移除功能（那個不需要 key）。"
             )
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(
-            headers={"Authorization": f"Bearer {api_key}"}, timeout=300.0
-        )
+        self._client = httpx.Client(headers={"Authorization": f"Bearer {api_key}"}, timeout=300.0)
         self._models: list[ImageModel] | None = None
 
     # ── 模型清單 ────────────────────────────────────────────────
@@ -139,7 +137,10 @@ class OpenRouterClient:
             current = cheapest.get(model.id)
             if current is None or (
                 model.price_per_image is not None
-                and (current.price_per_image is None or model.price_per_image < current.price_per_image)
+                and (
+                    current.price_per_image is None
+                    or model.price_per_image < current.price_per_image
+                )
             ):
                 cheapest[model.id] = model
 
@@ -158,8 +159,12 @@ class OpenRouterClient:
         *,
         model: str,
         resolution: str | None = None,
+        references: Sequence[np.ndarray] = (),
     ) -> EditResponse:
         """送一張圖加指令，回傳模型產生的圖。
+
+        ``references`` 是使用者另外給的參考圖（例如「把這隻狗加進去」的那隻狗）。
+        它們會接在主要那張之後，順序即指令裡說的「第幾張」。
 
         **不需要遮罩。** OpenRouter 的圖像 API 沒有這個參數。
         我們只取回傳圖在遮罩內的部分，其餘由本地合成器保留原樣。
@@ -167,12 +172,13 @@ class OpenRouterClient:
         if not prompt.strip():
             raise ProviderError("請描述要做甚麼，例如「移除中間的人」或「加一隻小狗」。")
 
-        prepared = _fit(image, MAX_SEND_PX)
+        sent = [_fit(image, MAX_SEND_PX)] + [_fit(ref, MAX_SEND_PX) for ref in references]
         body: dict = {
             "model": model,
             "prompt": prompt.strip(),
             "input_references": [
                 {"type": "image_url", "image_url": {"url": _data_url(prepared)}}
+                for prepared in sent
             ],
             "n": 1,
         }
@@ -191,7 +197,9 @@ class OpenRouterClient:
         if response.status_code == 402:
             raise ProviderError("帳戶餘額不足。")
         if response.status_code != 200:
-            raise ProviderError(f"模型回報錯誤（HTTP {response.status_code}）：{response.text[:300]}")
+            raise ProviderError(
+                f"模型回報錯誤（HTTP {response.status_code}）：{response.text[:300]}"
+            )
 
         payload = response.json()
         items = payload.get("data") or []
@@ -204,9 +212,7 @@ class OpenRouterClient:
         # 模型的輸出尺寸未必等於送出的尺寸，要縮放回去才能合成。
         if produced.shape[:2] != image.shape[:2]:
             produced = np.asarray(
-                Image.fromarray(produced).resize(
-                    (image.shape[1], image.shape[0]), Image.LANCZOS
-                )
+                Image.fromarray(produced).resize((image.shape[1], image.shape[0]), Image.LANCZOS)
             )
 
         return EditResponse(

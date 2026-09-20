@@ -28,7 +28,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from photoman import config
-from photoman.edit import EditResult, apply_generative_edit
+from photoman.edit import API_THRESHOLD, EditResult, apply_generative_edit
 from photoman.image import SourceInfo, load_srgb
 from photoman.layers import EditLayer
 from photoman.layers import render as render_layers
@@ -42,6 +42,28 @@ STATIC = Path(__file__).parent / "static"
 # 預覽圖的最長邊。原圖可能是 42 MP，直接送給瀏覽器既慢又沒有意義——
 # 螢幕上根本看不出分別，而資料量差幾十倍。
 PREVIEW_MAX = 1600
+
+# 放大時那一塊最多回傳的邊長。它只在放大時用，而放大時可見的範圍很小，
+# 所以這個上限幾乎不會碰到——留著是為了擋住畸形的請求。
+DETAIL_MAX = 2400
+
+# 匯出的品質。實測（3213×5712 ＝ 18.4 MP 的真實照片，原檔 5.05 MB）：
+#
+#   PNG          17.32 MB   逐位元相同
+#   WebP 無損    11.85 MB   逐位元相同——但慢十倍，而且只小 32%，不值得
+#   WebP q95      3.49 MB   平均差 0.95 級
+#
+# PNG 比原檔的 JPEG 大 3.4 倍，而 WebP q95 比原檔還小。
+# 所以預設用 WebP q95，PNG 留給要完全不失真的人。
+WEBP_QUALITY = 95
+
+# 0–6，愈大愈慢愈小。4 是實測的平衡點：18 MP 約 3 秒。
+WEBP_METHOD = 4
+
+# 使用者一次最多可以附幾張參考圖。真正的上限由模型決定
+# （見 providers.ImageModel.max_references），介面會照那個數字擋；
+# 這裡是伺服器端的保險。
+MAX_REFERENCES = 4
 
 
 def _png_data_url(array: np.ndarray) -> str:
@@ -200,6 +222,79 @@ def preview(source: bool = False) -> dict:
     """預覽圖。預設是**目前的成品**（所有已接受的編輯）；``?source=true`` 是原圖。"""
     SESSION.require_image()
     return {"image": _png_data_url(SESSION.source_preview if source else SESSION.preview)}
+
+
+@app.get("/api/detail")
+def detail(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    w: int,
+    h: int,
+    source: bool = False,
+) -> dict:
+    """**放大時看的那一塊**——由原檔重新取樣，不是預覽被放大。
+
+    為甚麼需要它：預覽的最長邊是 1600，所以 3213×5712 的圖在畫布上
+    只有原來的 28%。放大超過那個密度之後，看到的其實是縮圖被拉大——
+    實測高頻細節只剩一半（相鄰像素差的標準差 9.7 → 5.5）。
+    對一個修圖工具來說這是致命的：**你沒辦法判斷自己修的品質。**
+
+    ★ **回傳的是「螢幕要多少像素就給多少」，不是原解析度那一塊。**
+    送原解析度的話，放大 1.2 倍時就要傳 8 MP；而螢幕根本顯示不了那麼多。
+    由原檔裁出來、縮到瀏覽器要的尺寸，資料量就等於視窗大小，
+    而畫質是原檔的畫質。
+
+    ``w``/``h`` 是瀏覽器要的輸出尺寸（＝螢幕像素）。
+    """
+    SESSION.require_image()
+    height, width = SESSION.source.shape[:2]
+
+    # 使用者可以把畫面拖到照片外，所以範圍要夾回圖內。
+    # ★ 要**先排序再夾**，不是邊排序邊夾：整塊都在圖外的請求
+    # （x0=5000, x1=6000）在後者的寫法下會變成 (width, 5000)，
+    # 兩個數字相差很遠，於是通過了「範圍太小」的檢查，然後切出一塊空的。
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    left = max(0.0, min(float(width), left))
+    right = max(0.0, min(float(width), right))
+    top = max(0.0, min(float(height), top))
+    bottom = max(0.0, min(float(height), bottom))
+    if right - left < 1 or bottom - top < 1:
+        raise HTTPException(status_code=400, detail="這一塊在照片之外")
+
+    left, top = int(left), int(top)
+    right, bottom = max(left + 1, int(round(right))), max(top + 1, int(round(bottom)))
+    target = (
+        max(1, min(DETAIL_MAX, w)),
+        max(1, min(DETAIL_MAX, h)),
+    )
+
+    image = SESSION.source if source else SESSION.working
+    region = image[top:bottom, left:right]
+    mask_region = SESSION.mask[top:bottom, left:right]
+
+    # 縮小用 BOX（區域平均，幼細的筆畫才不會斷成虛線）、
+    # 放大用 BILINEAR（最近鄰會令遮罩邊緣成階梯）。
+    shrinking = target[0] < region.shape[1]
+    mask_filter = Image.BOX if shrinking else Image.BILINEAR
+    image_filter = Image.LANCZOS if shrinking else Image.BICUBIC
+
+    drawn = np.asarray(Image.fromarray(region).resize(target, image_filter))
+    small = Image.fromarray((mask_region.astype(np.uint8) * 255), mode="L").resize(
+        target, mask_filter
+    )
+    overlay = _mask_overlay(np.asarray(small) > 127)
+
+    return {
+        "image": _png_data_url(drawn),
+        "overlay": _png_data_url(overlay),
+        "x": left,
+        "y": top,
+        "width": right - left,
+        "height": bottom - top,
+    }
 
 
 @app.get("/api/settings")
@@ -495,6 +590,17 @@ def mask_stroke(request: StrokeRequest) -> dict:
         return _apply_region(_decode_mask_png(request.image), request.mode)
 
 
+def _decode_data_url(data_url: str) -> Image.Image:
+    """解開瀏覽器送來的 data URL。格式不對就明確報錯。"""
+    payload = data_url.partition(",")[2]
+    if not payload:
+        raise HTTPException(status_code=400, detail="圖片的格式不對")
+    try:
+        return Image.open(io.BytesIO(base64.b64decode(payload)))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"圖片無法解讀：{exc}") from exc
+
+
 def _decode_mask_png(data_url: str) -> np.ndarray:
     """把瀏覽器送來的遮罩圖換算成**原圖座標**的 bool 陣列。
 
@@ -504,14 +610,7 @@ def _decode_mask_png(data_url: str) -> np.ndarray:
     留下階梯，而那個階梯比羽化半徑粗的時候就看得出鋸齒。雙線性給的是
     半像素精度的邊界，正好是筆刷本來就有的不確定度。
     """
-    payload = data_url.partition(",")[2]
-    if not payload:
-        raise HTTPException(status_code=400, detail="遮罩圖的格式不對")
-    try:
-        image = Image.open(io.BytesIO(base64.b64decode(payload)))
-        small = np.asarray(image.convert("L"))
-    except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=400, detail=f"遮罩圖無法解讀：{exc}") from exc
+    small = np.asarray(_decode_data_url(data_url).convert("L"))
 
     height, width = SESSION.source.shape[:2]
     if small.shape[:2] != (height, width):
@@ -531,6 +630,9 @@ class ApplyRequest(BaseModel):
     method: str = "lama"
     dilate_px: int = 16
     feather_px: int = 12
+    # 使用者附的參考圖（data URL）。只有雲端模型用得到——
+    # 本機的 LaMa 沒有「參考圖」這個概念，它只會由邊界往內填。
+    references: list[str] = []
 
 
 @app.get("/api/models")
@@ -551,6 +653,9 @@ def list_models() -> dict:
                 "name": model.name,
                 "price": model.price_per_image,
                 "resolution": model.max_resolution,
+                # 介面用它決定可以附幾張參考圖。送出的圖已經佔了一張
+                # （標了紅色的選取範圍），所以可附的張數要再減一。
+                "max_references": model.max_references,
             }
             for model in models
         ],
@@ -580,7 +685,16 @@ def apply(request: ApplyRequest) -> dict:
 
         options: dict = {}
         if method.startswith("api:"):
-            options = {"prompt": request.prompt, "resolution": request.resolution}
+            options = {
+                "prompt": request.prompt,
+                "resolution": request.resolution,
+                "references": _decode_references(request.references),
+            }
+        elif request.references:
+            raise HTTPException(
+                status_code=400,
+                detail="參考圖只有雲端模型用得到——本機移除是由邊界往內填，沒有「參考」這個概念。",
+            )
 
         try:
             # ★ 由 **working** 起算，不是 source。這就是多步編輯的關鍵：
@@ -592,6 +706,15 @@ def apply(request: ApplyRequest) -> dict:
                 method=method,
                 dilate_px=request.dilate_px,
                 feather_px=request.feather_px,
+                # ★ 顏色對齊的意圖**按引擎走，而且是一條固定的產品規則**：
+                #   本機＝填補（它只會由邊界往內填，內容本來就該像周圍）
+                #   雲端＝編輯（它是用來「換成別的內容」的，只扣模型的漂移）
+                #
+                # 這不是「猜使用者的意圖」——先前試過讓使用者選，但那個選擇
+                # 本身才是負擔。現在介面直接寫明「只是要移除東西的話用本機」，
+                # 規則就只有一條。代價是用雲端移除東西時會與周圍有色差
+                # （實測 22.8／38.6 級），而那正是 `_trust_warning` 會講的事。
+                intent="edit" if method.startswith("api:") else "fill",
                 **options,
             )
         except (ImportError, FileNotFoundError, ProviderError, ValueError) as exc:
@@ -604,7 +727,41 @@ def apply(request: ApplyRequest) -> dict:
             "checksum": float(result.checksum),
             "method": method,
             "layers": len(SESSION.layers),
+            "warning": _trust_warning(result, method),
         }
+
+
+def _decode_references(data_urls: list[str]) -> list[np.ndarray]:
+    """解開使用者附的參考圖。"""
+    if len(data_urls) > MAX_REFERENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"最多只可以附 {MAX_REFERENCES} 張參考圖，收到 {len(data_urls)} 張。",
+        )
+    return [np.asarray(_decode_data_url(url).convert("RGB")) for url in data_urls]
+
+
+def _trust_warning(result: EditResult, method: str) -> str | None:
+    """模型有沒有照遮罩辦事？沒有的話要說出來。
+
+    ★ 這是 ``EditResult.is_trustworthy`` 存在的理由，而它先前**從來沒有
+    被呼叫過**。校驗環量度是模型在「被告知不要改」的區域改了多少級；
+    本機引擎本來就會重繪整張裁切圖（實測 LaMa 是 24–27），但那無害——
+    我們只取遮罩內的像素。**雲端模型聲稱會保留遮罩外，所以它的偏離
+    才有意義**（實測 gpt-5.4-image-2 與 seedream-4.5 都是 255，滿級）。
+
+    不否決結果：那是使用者已經付錢的呼叫，而且合成器本來就守住了遮罩外。
+    但使用者有權知道自己拿到的是甚麼。
+    """
+    if not method.startswith("api:") or result.is_trustworthy(API_THRESHOLD):
+        return None
+    return (
+        f"這個模型沒有照遮罩辦事：它在你圈選的範圍之外也改了 "
+        f"{result.checksum:.0f} 級（滿級 255），也就是把整張重新畫了一遍。"
+        "圈選範圍以外的像素仍然逐位元組沒變，但圈內的顏色是它自己決定的，"
+        "可能與周圍不符。框得越緊，這個問題越小；"
+        "只是要移除東西的話，用本機移除的顏色會準得多。"
+    )
 
 
 def _accept(
@@ -736,8 +893,12 @@ def _undo_payload() -> dict:
 
 
 @app.get("/api/result")
-def download_result() -> Response:
+def download_result(format: str = "webp") -> Response:
     """匯出成品——**原解析度**，不是預覽，而且含所有已接受的編輯。
+
+    預設是 WebP。理由很實際：PNG 存照片是浪費——實測同一張 18.4 MP 的圖，
+    PNG 是 17.32 MB（比原檔的 JPEG 大 3.4 倍），WebP q95 是 3.49 MB
+    （比原檔還小），而平均只差 0.95 級。要完全不失真的人可以要 PNG。
 
     用 ``Response`` 而不是 ``FileResponse``：後者要的是檔案路徑，
     而我們在記憶體裡已經有現成的位元組，沒有理由先寫到磁碟再讀回來。
@@ -746,13 +907,21 @@ def download_result() -> Response:
     if not SESSION.layers:
         # 沒有任何編輯時成品就等於原檔，匯出它沒有意義。
         raise HTTPException(status_code=400, detail="還沒有結果可以匯出")
+
+    image = Image.fromarray(SESSION.working)
     buffer = io.BytesIO()
-    Image.fromarray(SESSION.working).save(buffer, format="PNG")
-    name = (SESSION.source_path.stem if SESSION.source_path else "result") + "-photoman.png"
+    if format == "png":
+        image.save(buffer, format="PNG")
+        extension, media_type = "png", "image/png"
+    else:
+        image.save(buffer, format="WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+        extension, media_type = "webp", "image/webp"
+
+    stem = SESSION.source_path.stem if SESSION.source_path else "result"
     return Response(
         content=buffer.getvalue(),
-        media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{stem}-photoman.{extension}"'},
     )
 
 

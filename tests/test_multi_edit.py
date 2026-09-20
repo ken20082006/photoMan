@@ -64,10 +64,14 @@ def _open(client, path) -> dict:
 def _export(client) -> np.ndarray:
     """匯出的**原解析度**成品。
 
-    注意 ``response.content`` 已經是 PNG 位元組——不是 data URL，
+    ★ 指定 PNG：預設的 WebP 是**有損**的，而這個檔案裡每一條測試都在
+    逐位元比較兩次匯出的結果。有損編碼會令「本來相同的區域」因為旁邊
+    的內容不同而編出不同的位元組——那是編碼器的性質，不是我們的 bug。
+
+    注意 ``response.content`` 已經是圖檔位元組——不是 data URL，
     不要再 base64 解一次。
     """
-    response = client.get("/api/result")
+    response = client.get("/api/result?format=png")
     assert response.status_code == 200, response.text
     return np.asarray(Image.open(io.BytesIO(response.content)))
 

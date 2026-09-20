@@ -125,7 +125,7 @@
     border-radius: 0 0 0 6px; background: rgba(0,0,0,.7); color: #fff;
     font-size: 12px; line-height: 17px; cursor: pointer;
   }
-  /* 畫布游標：平時是十字（要畫），按著右鍵拖曳時是「抓著」。 */
+  /* 畫布游標：平時是十字（要畫），按著中鍵拖曳時是「抓著」。 */
   #stage-wrap.draw { cursor: crosshair; }
   #stage-wrap.grabbing { cursor: grabbing; }
   /* 縮放列。用 class 而不是 id 做版面——id 選擇器一旦設定 display，
@@ -284,7 +284,7 @@
     <div class="group">
       <h2>移動與縮放</h2>
       <p class="hint">
-        滾輪縮放；**按住右鍵拖曳**可以移動畫面（中鍵也可以）。
+        滾輪縮放；<b>按住滑鼠中鍵拖曳</b>可以移動畫面。
         放大之後，畫面會自動改由原檔取樣，所以你看到的是真正的像素。
       </p>
       <p class="hint">縮放的按鈕在畫布上方。按百分比可以回到原尺寸（100%）。</p>
@@ -378,9 +378,7 @@ function buildStage() {
     zoomBy(event.evt.deltaY < 0 ? 1.08 : 1 / 1.08, pointer);
   });
 
-  // 右鍵用來拖曳畫面，所以不要彈出瀏覽器的選單。
-  stage.on("contextmenu", (event) => event.evt.preventDefault());
-
+  
   window.addEventListener("resize", fitToWindow);
   return stage;
 }
@@ -1157,13 +1155,18 @@ function setMode(next) {
 function onPointerDown(event) {
   if (!photoImage) return;
 
-  // 移動：**右鍵**（中鍵也可以）。不佔一個工具按鈕——平移是隨時要用的
-  // 動作，不應該逼使用者在「畫」與「移動」之間切來切去。
+  // 移動：**中鍵**。不佔一個工具按鈕——平移是隨時要用的動作，
+  // 不應該逼使用者在「畫」與「移動」之間切來切去。
+  //
+  // ⚠️ 一開始用右鍵，但**右鍵在瀏覽器裡不可靠**（選單、拖放、
+  // 系統手勢都會來搶），使用者實測「右鍵移動不行」。中鍵沒有這些問題。
   //
   // 自己實作而不是用 Konva 的拖曳：不必猜 Konva 的內部狀態，
   // 而且我們本來就需要一個「視野變了」的鉤子去重抓放大時的細節。
   const button = event && event.evt ? event.evt.button : 0;
-  if (button === 2 || button === 1) {
+  if (button === 1) {
+    // 中鍵按下去會觸發瀏覽器的自動捲動，要擋掉。
+    if (event.evt.cancelable) event.evt.preventDefault();
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
     panning = { x: pointer.x, y: pointer.y, stageX: stage.x(), stageY: stage.y() };

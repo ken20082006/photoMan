@@ -198,7 +198,14 @@ app = FastAPI(title="photoMan")
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    """介面。
+
+    ★ **一定要 no-cache。** 這一頁由磁碟供應，而且開發期間經常在改；
+    沒有這一條的話，瀏覽器會拿舊的快取，使用者看到的是上一個版本的介面
+    ——而且他沒有任何辦法知道。實際發生過：按鈕明明拿掉了，回報卻是
+    「還在」。這種誤會浪費的是雙方的時間。
+    """
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/static/{name}")

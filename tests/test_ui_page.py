@@ -197,17 +197,21 @@ class TestHistoryControls:
 class TestPanAndZoomDetail:
     """拖曳與放大。兩個都是實測到的缺口。"""
 
-    def test_panning_is_on_the_right_button_not_a_tool(self, js: str) -> None:
+    def test_panning_is_on_the_middle_button_not_a_tool(self, js: str) -> None:
         """★ 平移**不佔一個工具按鈕**——它是隨時要用的動作，
-        不應該逼使用者在「畫」與「移動」之間切來切去。"""
-        assert "button === 2" in js, "右鍵要可以拖曳畫面"
-        assert "button === 1" in js, "中鍵也保留"
+        不應該逼使用者在「畫」與「移動」之間切來切去。
+
+        ⚠️ 一開始用右鍵，但右鍵在瀏覽器裡不可靠（選單、拖放、系統手勢
+        都會來搶），使用者實測「右鍵移動不行」。所以改用中鍵。
+        """
+        assert "button === 1" in js, "中鍵要可以拖曳畫面"
+        assert "button === 2" not in js, "右鍵不再用來平移——它在瀏覽器裡不可靠"
         assert 'id="tool-move"' not in js
 
-    def test_the_browser_menu_is_suppressed_on_the_canvas(self, js: str) -> None:
-        """右鍵用來拖曳，就不可以彈出選單。"""
-        assert "contextmenu" in js
-        assert "preventDefault" in js.split("contextmenu")[1][:120]
+    def test_the_middle_button_auto_scroll_is_suppressed(self, js: str) -> None:
+        """中鍵按下去會觸發瀏覽器的自動捲動，要擋掉。"""
+        down = re.search(r"function onPointerDown\(event\) \{(.*?)\n\}", js, re.S).group(1)
+        assert "preventDefault" in down
 
     def test_panning_is_implemented_by_hand(self, js: str) -> None:
         """自己實作而不用 Konva 的 drag——不必猜 Konva 的內部狀態，

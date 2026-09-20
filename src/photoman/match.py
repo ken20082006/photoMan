@@ -31,6 +31,19 @@ import numpy as np
 # 太遠則可能取到不同的材質區域。
 REFERENCE_INSET_PX = 6
 
+# 「模型大致保留了這裡的原內容」的判定門檻（0–255，取三通道最大差）。
+#
+# 這是 ``intent="edit"`` 用來量模型色偏的依據：**在模型自己保留的內容上量**，
+# 因為那裡我們知道真值（原圖）。見 :func:`match_colour` 的說明。
+#
+# 為甚麼是 8：實測模型的描繪誤差是 1–5 級，而使用者要的改動通常大得多
+# （改髮型那一次是 50 級）。門檻放大到 20 會把「使用者要的細微改動」也
+# 算成誤差而抹掉——實測偏移量會由 +0.4 漲到 +2.9，也就是愈修愈偏。
+PRESERVED_DIFF = 8
+
+# 保留區至少要佔遮罩的這個比例，否則樣本不足，退回用遮罩外的環量。
+MIN_PRESERVED_FRACTION = 0.1
+
 
 def _reference_region(mask: np.ndarray, inset_px: int) -> np.ndarray:
     """遮罩以外、且離邊界至少 ``inset_px`` 的像素。"""
@@ -75,11 +88,41 @@ def _clean_shift(mask: np.ndarray) -> tuple[int, int] | None:
     return None
 
 
+def _edit_offset(
+    patch: np.ndarray,
+    original: np.ndarray,
+    mask: np.ndarray,
+    reference: np.ndarray,
+) -> np.ndarray:
+    """編輯意圖要扣掉的偏移——**在模型自己保留的內容上量**。
+
+    遮罩內有些像素模型是「照抄」原圖的（臉、衣服……），有些是它新畫的
+    （頭髮、新加的物件）。前者我們知道真值，所以在那裡量得到模型真正的
+    描繪誤差；後者量不到（我們不知道它「應該」是甚麼）。
+
+    在遮罩外的環上量是錯的——那裡的內容與遮罩內不同，模型的誤差也不同。
+    實測：背景偏 −10.8 而臉只偏 −5，把背景的偏量套到臉上會令臉提亮 8.9 級，
+    那正是使用者看到的色差。
+
+    遮罩內幾乎沒有保留區時（模型把整塊換掉了），退回用環量。
+    """
+    difference = np.abs(patch.astype(np.int16) - original.astype(np.int16)).max(axis=2)
+    preserved = mask & (difference < PRESERVED_DIFF)
+
+    lab_patch = cv2.cvtColor(patch, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_original = cv2.cvtColor(original, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    if preserved.sum() < MIN_PRESERVED_FRACTION * mask.sum():
+        return lab_original[reference].mean(axis=0) - lab_patch[reference].mean(axis=0)
+    return lab_original[preserved].mean(axis=0) - lab_patch[preserved].mean(axis=0)
+
+
 def match_colour(
     patch: np.ndarray,
     original: np.ndarray,
     mask: np.ndarray,
     *,
+    intent: str = "fill",
     inset_px: int = REFERENCE_INSET_PX,
 ) -> np.ndarray:
     """把生成塊的**整體色調**校正到與周圍一致（LAB 空間的位移）。
@@ -99,6 +142,49 @@ def match_colour(
     只修均值等於修正曝光與色偏——那正是模型真正會出錯的地方，
     而且這個操作不會放大任何東西。
 
+    ★ **``intent`` 決定「均值要對到甚麼」，這是 2026-09-19 才分開的。**
+
+    ``"fill"``（填補，本機引擎）
+        把生成塊遮罩區的均值對到**周圍**。填出來的東西本來就應該像周圍，
+        所以這是對的。
+
+    ``"edit"``（編輯，雲端模型）
+        **只扣掉模型的色偏，而且是在「模型自己保留的內容」上量它。**
+
+        理由是一個實測到的嚴重失敗：``fill`` 的做法會把使用者**要求**的
+        顏色改動抹掉。實測「把衣服改成紅色」：周圍是綠草、模型畫了
+        (170, 40, 40) 的紅，經過 ``fill`` 之後變成 **(89, 129, 60)**，
+        也就是周圍的綠色——**叫它改紅色，它抹回綠色**。
+
+        ⚠️ **2026-09-20 修正：量的地方不可以是遮罩外的環。**
+
+        第一版用遮罩外的環去量「模型把整張圖偏移了多少」，再套到遮罩上。
+        那個假設是「模型的色偏在全圖一致」——**實測不成立**：
+
+        | 改髮型那一次（遮罩內含臉與頭髮） | |
+        |---|---|
+        | 背景（環）的偏移 | −10.8 |
+        | 臉的偏移 | **−5** |
+        | 扣掉環的偏移之後，臉的殘餘差 | **+8.9** |
+
+        也就是說，把背景的偏移套到臉上會**過頭**——那正是使用者回報
+        「換成・加入還是有點色差」的來源。
+
+        → 現在改為：在遮罩內挑出**模型大致保留了原內容**的像素
+        （``|模型 − 原圖| < PRESERVED_DIFF``），在那裡量偏移。
+        那裡我們知道真值，所以量到的是模型真正的描繪誤差。
+
+        實測（使用者三個真實圖層、三個不同模型）——「模型保留區」的殘餘差：
+
+        | 案例 | 不修正 | 用環量（舊） | 用保留區量（新） |
+        |---|---|---|---|
+        | 移除人物 ①（gemini） | −3.0 | −3.5 | **−0.3** |
+        | 移除人物 ②（grok） | −1.8 | −1.3 | **−0.3** |
+        | 改髮型（gpt-5.4） | −3.5 | +8.9 | **−0.3** |
+
+        遮罩內幾乎沒有保留區時（模型把整塊換掉了，例如純粹的移除），
+        退回用遮罩外的環量——那時沒有真值可以對。
+
     整塊校正，不做局部混合。回傳新的陣列。
     """
     reference = _reference_region(mask, inset_px)
@@ -108,7 +194,10 @@ def match_colour(
     lab_patch = cv2.cvtColor(patch, cv2.COLOR_RGB2LAB).astype(np.float32)
     lab_original = cv2.cvtColor(original, cv2.COLOR_RGB2LAB).astype(np.float32)
 
-    offset = lab_original[reference].mean(axis=0) - lab_patch[mask].mean(axis=0)
+    if intent == "edit":
+        offset = _edit_offset(patch, original, mask, reference)
+    else:
+        offset = lab_original[reference].mean(axis=0) - lab_patch[mask].mean(axis=0)
 
     corrected = np.clip(lab_patch + offset, 0.0, 255.0).astype(np.uint8)
 

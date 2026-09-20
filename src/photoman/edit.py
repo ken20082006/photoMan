@@ -90,6 +90,7 @@ def apply_generative_edit(
     min_margin_px: int = 64,
     checksum_inset_px: int = 0,
     match_texture: bool = True,
+    intent: str = "fill",
     **engine_options,
 ) -> EditResult:
     """對 ``base`` 套用一次局部生成編輯。
@@ -98,6 +99,14 @@ def apply_generative_edit(
         底圖，uint8 sRGB、**原圖座標**（§6.1c）。
     ``mask``
         使用者圈選的範圍，bool、原圖座標。
+    ``intent``
+        「這次是填補還是編輯」——決定顏色對齊要對到甚麼，見
+        :func:`photoman.match.match_colour`。**這要由使用者選，不可以由引擎猜**：
+        同一個雲端模型既可能被叫去「移除人物」（填補），也可能被叫去
+        「把衣服改成紅色」（編輯），而兩者要的對齊是相反的。
+        實測同一組真實的圖層：填補意圖留下的落差是 2.4／3.9 級，
+        編輯意圖是 22.8／38.6 級——**用錯就是看得到的一塊方框，或者
+        被抹掉的顏色**。
 
     回傳的 ``image`` 是新的陣列；``base`` 不會被修改，
     而且 ``mask`` 對應的混合範圍以外，位元組與 ``base`` 完全相同。
@@ -134,7 +143,8 @@ def apply_generative_edit(
         # 第 9、10 步：把生成塊融入周圍。**這是令填補消失的關鍵。**
         # 少了這兩步，任何引擎——本地或 API——都會留下一個
         # 與遮罩同形狀的平滑色塊。
-        patch = match_colour(patch, base_crop, denoise_crop)
+        #
+        patch = match_colour(patch, base_crop, denoise_crop, intent=intent)
         patch = match_grain(patch, base_crop, denoise_crop)
 
     image = composite_patch_into_bytes(base, patch, crop, alpha)

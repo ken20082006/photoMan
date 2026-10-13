@@ -230,7 +230,7 @@
       <h2>第二步：要做甚麼</h2>
       <p class="hint">
         留空＝移除選中的東西（本機，不需要 API key）。或者描述你想做甚麼，
-        那就交給雲端模型。
+        那就交給本機 Codex 或雲端 API 模型。
       </p>
       <p class="hint">
         <b>只是要移除東西的話，用本機</b>——免費、原解析度，而且顏色與周圍
@@ -240,10 +240,11 @@
       <textarea id="prompt" rows="2"
         placeholder="留空＝移除選中的東西&#10;或輸入指令，例如：把這件衣服換成紅色"></textarea>
       <select id="model"><option value="">本機移除（不需要 API key）</option></select>
+      <p class="hint" id="codex-hint" hidden>使用此電腦已登入 ChatGPT 的 Codex 生圖，無需 API key，會使用 Codex 額度。只傳送裁切區域、圈選提示及所附參考圖；通常需要 1–3 分鐘。圖片生成仍在雲端進行。</p>
       <div class="group slim" id="reference-group">
         <!-- 用 label ＋原生檔案選擇，與「選擇照片」同一個理由：
              腳本錯誤時它仍然能用。 -->
-        <label class="file" for="reference-input">加入參考圖<small id="reference-hint">選擇雲端模型之後才能用</small></label>
+        <label class="file" for="reference-input">加入參考圖<small id="reference-hint">選擇 Codex 或雲端模型之後才能用</small></label>
         <input type="file" id="reference-input" accept="image/*" multiple hidden>
         <div class="thumbs" id="reference-list"></div>
       </div>
@@ -297,7 +298,7 @@
     <label for="api-key">OpenRouter API key</label>
     <input type="password" id="api-key" placeholder="sk-or-v1-…">
     <p class="hint" style="margin:0">
-      只在使用雲端模型時才需要。預設的移除功能完全在本機執行，不需要 key。
+      只有 OpenRouter 模型需要此 key。本機 Codex 使用既有 ChatGPT 登入；本機移除亦不需要 key。
     </p>
     <div class="row">
       <button id="settings-cancel">取消</button>
@@ -626,12 +627,17 @@ async function rememberOverlay(payload) {
 
 function updateMaskStat(payload) {
   const pixels = payload.mask_pixels || 0;
+  if (snapshot) snapshot.mask_pixels = pixels;
   $("mask-stat").textContent = pixels
     ? `已選取 ${pixels.toLocaleString()} 個像素`
     : "未選取任何東西";
   $("btn-apply").disabled = !pixels;
   if (!pixels) {
     $("apply-hint").textContent = "先選取一樣東西";
+    return;
+  }
+  if ($("model").value === "codex:local") {
+    $("apply-hint").textContent = "由本機 Codex 生圖，無需 API key";
     return;
   }
   if (!$("prompt").value.trim()) {
@@ -776,6 +782,7 @@ const REFERENCE_MAX_PX = 1536;
 
 function referenceLimit() {
   const model = $("model").value;
+  if (model === "codex:local") return 4;
   if (!model) return 0;
   const info = modelInfo[model];
   // 送出的圖已經有一張是「標了紅色的選取範圍」，所以要扣一張。
@@ -783,6 +790,7 @@ function referenceLimit() {
 }
 
 function renderReferences() {
+  $("codex-hint").hidden = $("model").value !== "codex:local";
   const list = $("reference-list");
   list.textContent = "";
   references.forEach((reference, index) => {
@@ -806,7 +814,7 @@ function renderReferences() {
   const hint = $("reference-hint");
   $("reference-group").classList.toggle("off", limit === 0);
   hint.textContent = limit === 0
-    ? "選擇雲端模型之後才能用"
+    ? "選擇 Codex 或雲端模型之後才能用"
     : `已加 ${references.length} 張，最多 ${limit} 張`;
 }
 
@@ -858,9 +866,15 @@ async function shrinkToDataURL(file) {
 async function runApply() {
   const prompt = $("prompt").value.trim();
   const model = $("model").value;
+  const isCodex = model === "codex:local";
+
+  if (isCodex && !prompt) {
+    showError("請描述要讓 Codex 修改的內容。");
+    return;
+  }
 
   if (prompt && !model) {
-    showError("要下指令的話，請在上面選一個雲端模型。留空就只是移除。");
+    showError("要下指令的話，請選擇本機 Codex 或雲端模型。留空就只是移除。");
     return;
   }
   if (references.length && !model) {
@@ -869,7 +883,9 @@ async function runApply() {
   }
 
   showBusy(
-    model
+    isCodex
+      ? "交給本機 Codex 生圖…（通常需要 1–3 分鐘）"
+      : model
       ? "交給雲端模型…（可能要 10–60 秒）"
       : "移除中…（本機模型，約 10–30 秒）"
   );
@@ -888,7 +904,7 @@ async function runApply() {
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
     workingImageURL = null;   // 成品變了，快取要失效
     await refreshState();
-    const how = model ? "雲端模型" : "本機模型";
+    const how = isCodex ? "本機 Codex" : model ? "雲端模型" : "本機模型";
     $("result-stat").textContent =
       `完成（${how}，用時 ${seconds} 秒）。圈選範圍以外完全沒有改動。`;
     await setView("after");
@@ -1091,7 +1107,10 @@ function bind() {
   window.addEventListener("mouseup", endPointer);
   window.addEventListener("touchend", endPointer);
 
-  $("model").onchange = renderReferences;
+  $("model").onchange = () => {
+    renderReferences();
+    updateMaskStat(snapshot || {});
+  };
   $("reference-input").onchange = async (event) => {
     for (const file of Array.from(event.target.files)) {
       await addReference(file);

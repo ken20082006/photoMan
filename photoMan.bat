@@ -30,7 +30,7 @@ echo   The browser will open in a moment.
 echo   Close this window to stop, or press Ctrl+C.
 echo.
 
-".venv\Scripts\python.exe" -m photoman.cli ui
+".venv\Scripts\python.exe" -X utf8 -m photoman.cli ui
 
 if errorlevel 1 (
   echo.

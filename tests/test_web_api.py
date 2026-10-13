@@ -571,6 +571,54 @@ class TestReferenceImages:
         assert payload["models"][0]["max_references"] == 3
 
 
+class TestCodexImages:
+    def test_available_without_api_key(self, client, monkeypatch):
+        from photoman import codex_images, providers
+
+        monkeypatch.setattr(codex_images, "find_codex", lambda: "codex.exe")
+
+        def no_key():
+            raise providers.ProviderError("尚未設定 API key")
+
+        monkeypatch.setattr(providers, "client_from_config", no_key)
+        payload = client.get("/api/models").json()
+        assert payload["models"][0]["id"] == "codex:local"
+
+    def test_composite_undo_and_reload(self, client, sample_image, monkeypatch):
+        from photoman.codex_images import CodexImageClient
+        from photoman.mask import prepare_masks
+        from photoman.providers import EditResponse
+
+        def edit(self, image, prompt, **kwargs):
+            assert "second image" in prompt
+            assert len(kwargs["references"]) == 1
+            return EditResponse(np.full_like(image, 180), None, 1, "codex:local")
+
+        monkeypatch.setattr(CodexImageClient, "edit", edit)
+        _open(client, sample_image)
+        original = server.SESSION.working.copy()
+        client.post("/api/mask/rect", json={"x0": 80, "y0": 60, "x1": 150, "y1": 100})
+        _, alpha = prepare_masks(server.SESSION.mask, dilate_px=16, feather_px=12)
+        reply = client.post("/api/apply", json={"model": "codex:local", "prompt": "改成白色"})
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["method"] == "codex:local"
+        result = server.SESSION.working.copy()
+        assert np.array_equal(result[alpha == 0], original[alpha == 0])
+        assert not np.array_equal(result, original)
+        assert client.post("/api/undo").status_code == 200
+        assert np.array_equal(server.SESSION.working, original)
+        assert client.post("/api/redo").status_code == 200
+        assert np.array_equal(server.SESSION.working, result)
+        _open(client, sample_image)
+        assert np.array_equal(server.SESSION.working, result)
+
+    def test_requires_instruction(self, client, sample_image):
+        _open(client, sample_image)
+        client.post("/api/mask/rect", json={"x0": 80, "y0": 60, "x1": 150, "y1": 100})
+        response = client.post("/api/apply", json={"model": "codex:local"})
+        assert response.status_code == 400
+
+
 class TestEditIntent:
     """顏色對齊的意圖**按引擎決定**，而且是一條固定的產品規則。
 

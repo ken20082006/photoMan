@@ -266,6 +266,10 @@ def get_inpainter(method: str, **options) -> Inpainter:
         if not model:
             raise ValueError("api: 後面要接模型代號，例如 api:bytedance-seed/seedream-5-0-lite")
         return ApiInpainter(model=model, **options)
+    if family == "codex":
+        from photoman.codex_images import CODEX_MODEL, CodexImageClient
+
+        return ApiInpainter(model=CODEX_MODEL, client=CodexImageClient(), **options)
     raise ValueError(
         f"未知的 inpainting 方法：{method}\n支援 telea、ns、lama，以及 api:<model-id>。"
     )

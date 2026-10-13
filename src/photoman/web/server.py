@@ -1,7 +1,7 @@
 """本地介面的伺服器（見 docs/design.md §7.2）。
 
 **完全離線。** Konva 內嵌在 `static/`，沒有任何 CDN、沒有建置步驟。
-唯一的對外連線是使用者自己選的 API 模型。
+對外連線由使用者選擇的 API 模型或本機 Codex 生圖發起。
 
 **座標約定：瀏覽器一律送「預覽圖的像素座標」，伺服器負責換算成原圖座標。**
 這樣瀏覽器不需要知道原圖有多大（42 MP 的圖送給瀏覽器沒有意義），
@@ -644,14 +644,20 @@ class ApplyRequest(BaseModel):
 
 @app.get("/api/models")
 def list_models() -> dict:
-    """可用的雲端模型，按價格排序。沒有 API key 時回傳空清單而不是報錯——
-    本機功能不需要 key，不應該因為沒有 key 就不能用介面。"""
+    """列出 API 模型及本機 Codex；沒有 API key 時仍提供免 key 的選項。"""
+    from photoman.codex_images import CODEX_MODEL, find_codex
     from photoman.providers import ProviderError, client_from_config
+
+    codex = {
+        "id": CODEX_MODEL, "name": "本機 Codex（ChatGPT 登入，無需 API key）",
+        "price": None, "resolution": "", "max_references": MAX_REFERENCES + 2,
+    }
+    local_models = [codex] if find_codex() else []
 
     try:
         models = client_from_config().models()
     except ProviderError as exc:
-        return {"models": [], "note": str(exc)}
+        return {"models": local_models, "note": str(exc)}
 
     return {
         "models": [
@@ -665,7 +671,7 @@ def list_models() -> dict:
                 "max_references": model.max_references,
             }
             for model in models
-        ],
+        ] + local_models,
         "note": None,
     }
 
@@ -680,7 +686,11 @@ def apply(request: ApplyRequest) -> dict:
             raise HTTPException(status_code=400, detail="還沒有選取任何東西")
 
         wants_instruction = bool(request.prompt.strip())
-        if request.model:
+        if request.model == "codex:local":
+            method = "codex:local"
+            if not wants_instruction:
+                raise HTTPException(status_code=400, detail="請描述要讓 Codex 修改的內容。")
+        elif request.model:
             method = f"api:{request.model}"
         elif wants_instruction:
             raise HTTPException(status_code=400, detail="要下指令的話需要先選一個雲端模型。")
@@ -691,7 +701,7 @@ def apply(request: ApplyRequest) -> dict:
             method = request.method or "lama"
 
         options: dict = {}
-        if method.startswith("api:"):
+        if method.startswith(("api:", "codex:")):
             options = {
                 "prompt": request.prompt,
                 "resolution": request.resolution,
@@ -721,7 +731,7 @@ def apply(request: ApplyRequest) -> dict:
                 # 本身才是負擔。現在介面直接寫明「只是要移除東西的話用本機」，
                 # 規則就只有一條。代價是用雲端移除東西時會與周圍有色差
                 # （實測 22.8／38.6 級）——介面已經寫明「移除用本機」。
-                intent="edit" if method.startswith("api:") else "fill",
+                intent="edit" if method.startswith(("api:", "codex:")) else "fill",
                 **options,
             )
         except (ImportError, FileNotFoundError, ProviderError, ValueError) as exc:

@@ -323,10 +323,9 @@ class TestReferenceImages:
         assert "function referenceLimit()" in js
         assert "max_references" in js
 
-    def test_they_are_shrunk_in_the_browser_first(self, js: str) -> None:
-        """原檔可能十幾 MB，直接 base64 上傳既慢又沒有意義。"""
-        assert "REFERENCE_MAX_PX" in js
-        assert "function shrinkToDataURL" in js
+    def test_reference_files_keep_their_original_resolution(self, js: str) -> None:
+        assert "dataURL: await readAsDataURL(file)" in js
+        assert "REFERENCE_MAX_PX" not in js
 
     def test_local_removal_refuses_references(self, js: str) -> None:
         assert "參考圖只有雲端模型用得到" in js

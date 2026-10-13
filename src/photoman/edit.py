@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from PIL import Image
 
 from photoman.composite import CropBox, composite_patch_into_bytes, plan_crop, ring_delta
 from photoman.inpaint import get_inpainter
@@ -43,6 +44,22 @@ from photoman.store import mask_digest
 # → 所以 :meth:`EditResult.is_trustworthy` 現在**要明確給門檻才會判斷**。
 # 只有在「模型聲稱會保留遮罩外」時（例如 API 模型）才有意義。
 API_THRESHOLD = 2.0
+
+
+class UpscaleRequired(ValueError):
+    """輸出要放大才能貼回；保留原尺寸結果，確認後不必再次生成。"""
+
+    def __init__(self, patch: np.ndarray, crop: CropBox) -> None:
+        self.patch = patch
+        self.crop = crop
+        self.output_size = (patch.shape[1], patch.shape[0])
+        self.target_size = (crop[2], crop[3])
+        self.scale = (crop[2] / patch.shape[1], crop[3] / patch.shape[0])
+        super().__init__(
+            f"AI 輸出 {self.output_size[0]}×{self.output_size[1]}，"
+            f"處理範圍（含周邊參考）為 {crop[2]}×{crop[3]}；"
+            f"需放大最多 {max(self.scale):.2f} 倍，細節可能變模糊。"
+        )
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,8 @@ def apply_generative_edit(
     checksum_inset_px: int = 0,
     match_texture: bool = True,
     intent: str = "fill",
+    generated_patch: np.ndarray | None = None,
+    allow_upscale: bool = False,
     **engine_options,
 ) -> EditResult:
     """對 ``base`` 套用一次局部生成編輯。
@@ -132,8 +151,18 @@ def apply_generative_edit(
     base_crop = base[y : y + height, x : x + width].copy()
     denoise_crop = denoise[y : y + height, x : x + width]
 
-    engine = get_inpainter(method, **engine_options)
-    patch = engine.inpaint(base_crop, denoise_crop)
+    if generated_patch is None:
+        engine = get_inpainter(method, **engine_options)
+        patch = engine.inpaint(base_crop, denoise_crop)
+    else:
+        patch = generated_patch
+
+    if patch.shape[:2] != base_crop.shape[:2]:
+        if not allow_upscale and (patch.shape[1] < width or patch.shape[0] < height):
+            raise UpscaleRequired(patch, crop)
+        patch = np.asarray(
+            Image.fromarray(patch).resize((width, height), Image.Resampling.LANCZOS)
+        )
 
     # 校驗環必須在合成之前量度——而且要在色彩與顆粒校正之前，
     # 因為它量度的是**模型的行為**，不是我們加工之後的結果（§5.2）。

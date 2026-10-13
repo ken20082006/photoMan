@@ -19,6 +19,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import uvicorn
@@ -28,14 +29,14 @@ from PIL import Image
 from pydantic import BaseModel
 
 from photoman import config
-from photoman.edit import EditResult, apply_generative_edit
+from photoman.edit import EditResult, UpscaleRequired, apply_generative_edit
 from photoman.image import SourceInfo, load_srgb
 from photoman.layers import EditLayer
 from photoman.layers import render as render_layers
 from photoman.paths import LAMA_MODEL_FILE, MODELS_DIR, SAM_DECODER_FILE, SAM_ENCODER_FILE
 from photoman.project import Checksum, GenerativeLayer
 from photoman.segment import get_segmenter
-from photoman.store import PROJECT_FILE, ProjectStore, SourceChangedError
+from photoman.store import PROJECT_FILE, ProjectStore, SourceChangedError, mask_digest
 
 STATIC = Path(__file__).parent / "static"
 
@@ -120,6 +121,7 @@ class Session:
     store: ProjectStore | None = None  # 掛上的專案；掛不上時為 None（仍可編輯）
     project_note: str | None = None
     revision: int = 0  # 每次重算 working 就加一——SAM 的嵌入快取靠它失效
+    pending_upscale: PendingUpscale | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def require_image(self) -> None:
@@ -362,6 +364,7 @@ def _open(path: Path, *, display_name: str) -> dict:
         SESSION.source = source
         SESSION.layers = []
         SESSION.redo = []
+        SESSION.pending_upscale = None
         SESSION.mask = np.zeros((height, width), dtype=bool)
         SESSION.store = None
         SESSION.project_note = None
@@ -494,6 +497,15 @@ def _segment(session: Session, **hints) -> np.ndarray:
     一個小物件的移除不會改變那些取樣點，於是會拿到編輯前的嵌入。
     """
     return _segmenter().segment(session.working, token=session.revision, **hints)
+
+
+@app.post("/api/select_all")
+def select_all() -> dict:
+    SESSION.require_image()
+    with SESSION.lock:
+        # 用原圖遮罩全選，避免預覽座標換算在邊緣留下未選像素。
+        SESSION.mask[:] = True
+        return _mask_payload()
 
 
 @app.post("/api/clear_mask")
@@ -642,6 +654,21 @@ class ApplyRequest(BaseModel):
     references: list[str] = []
 
 
+@dataclass
+class PendingUpscale:
+    token: str
+    request: ApplyRequest
+    output: UpscaleRequired
+    method: str
+    revision: int
+    mask_sha256: str
+
+
+class UpscaleDecision(BaseModel):
+    token: str
+    accept: bool
+
+
 @app.get("/api/models")
 def list_models() -> dict:
     """列出 API 模型及本機 Codex；沒有 API key 時仍提供免 key 的選項。"""
@@ -684,6 +711,7 @@ def apply(request: ApplyRequest) -> dict:
     with SESSION.lock:
         if not SESSION.mask.any():
             raise HTTPException(status_code=400, detail="還沒有選取任何東西")
+        SESSION.pending_upscale = None
 
         wants_instruction = bool(request.prompt.strip())
         if request.model == "codex:local":
@@ -734,6 +762,18 @@ def apply(request: ApplyRequest) -> dict:
                 intent="edit" if method.startswith(("api:", "codex:")) else "fill",
                 **options,
             )
+        except UpscaleRequired as exc:
+            # 待確認時只保留輸出，避免 traceback 留住全尺寸遮罩及裁切暫存陣列。
+            exc.__traceback__ = None
+            token = str(uuid4())
+            SESSION.pending_upscale = PendingUpscale(
+                token, request, exc, method, SESSION.revision, mask_digest(SESSION.mask)
+            )
+            return {
+                "requires_upscale": True, "token": token, "message": str(exc),
+                "output_size": exc.output_size, "target_size": exc.target_size,
+                "scale": exc.scale,
+            }
         except (ImportError, FileNotFoundError, ProviderError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -741,9 +781,37 @@ def apply(request: ApplyRequest) -> dict:
 
         return {
             "image": _png_data_url(SESSION.preview),
-            "checksum": float(result.checksum),
+            "checksum": _finite(result.checksum),
             "method": method,
             "layers": len(SESSION.layers),
+        }
+
+
+@app.post("/api/upscale/decision")
+def decide_upscale(decision: UpscaleDecision) -> dict:
+    with SESSION.lock:
+        pending = SESSION.pending_upscale
+        if pending is None or pending.token != decision.token:
+            raise HTTPException(status_code=409, detail="待確認的圖片已失效，請重新執行。")
+        SESSION.pending_upscale = None
+        if not decision.accept:
+            return {"cancelled": True}
+        SESSION.require_image()
+        if (
+            SESSION.revision != pending.revision
+            or mask_digest(SESSION.mask) != pending.mask_sha256
+        ):
+            raise HTTPException(status_code=409, detail="照片或選取範圍已改變，請重新執行。")
+        request = pending.request
+        result = apply_generative_edit(
+            SESSION.working, SESSION.mask, method=pending.method,
+            dilate_px=request.dilate_px, feather_px=request.feather_px, intent="edit",
+            generated_patch=pending.output.patch, allow_upscale=True,
+        )
+        _accept(SESSION, result, method=pending.method, prompt=request.prompt)
+        return {
+            "image": _png_data_url(SESSION.preview), "checksum": _finite(result.checksum),
+            "method": pending.method, "layers": len(SESSION.layers), "upscaled": True,
         }
 
 

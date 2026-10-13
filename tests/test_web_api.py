@@ -162,6 +162,26 @@ class TestSelection:
 
 
 class TestManualMask:
+    def test_select_all_needs_an_image(self, client):
+        assert client.post("/api/select_all").status_code == 400
+
+    def test_select_all_uses_every_original_pixel_without_a_model(
+        self, client, sample_image, monkeypatch,
+    ):
+        _open(client, sample_image)
+
+        def no_model():
+            pytest.fail("全選不應呼叫分割模型")
+
+        monkeypatch.setattr(server, "_segmenter", no_model)
+        client.post("/api/mask/rect", json={"x0": 80, "y0": 60, "x1": 150, "y1": 100})
+        response = client.post("/api/select_all")
+        assert response.status_code == 200
+        assert response.json()["mask_pixels"] == 160 * 240
+        assert server.SESSION.mask.all()
+        assert client.post("/api/select_all").json()["mask_pixels"] == 160 * 240
+        assert client.post("/api/clear_mask").json()["mask_pixels"] == 0
+
     """★ 使用者自己畫的範圍就是遮罩本身。
 
     這一整組**不需要任何模型**——那正是它的意義：手動圈選是
@@ -572,6 +592,108 @@ class TestReferenceImages:
 
 
 class TestCodexImages:
+    def test_full_image_selection_also_requires_upscale_confirmation(
+        self, client, sample_image, low_resolution_result,
+    ):
+        _open(client, sample_image)
+        client.post("/api/select_all")
+        response = client.post("/api/apply", json={"model": "codex:local", "prompt": "改成晚間"})
+        assert response.status_code == 200
+        assert response.json()["target_size"] == [240, 160]
+        assert response.json()["requires_upscale"] is True
+        assert server.SESSION.mask.all()
+        assert not server.SESSION.layers
+
+    @pytest.fixture
+    def low_resolution_result(self, monkeypatch):
+        from photoman.codex_images import CodexImageClient
+        from photoman.providers import EditResponse
+
+        calls = []
+
+        def edit(self, image, prompt, **kwargs):
+            calls.append(image.shape)
+            return EditResponse(np.full((40, 60, 3), 180, dtype=np.uint8), None, 1, "codex:local")
+
+        monkeypatch.setattr(CodexImageClient, "edit", edit)
+        return calls
+
+    def prepare_low_resolution(self, client, sample_image):
+        _open(client, sample_image)
+        client.post("/api/mask/rect", json={"x0": 80, "y0": 60, "x1": 150, "y1": 100})
+        response = client.post("/api/apply", json={"model": "codex:local", "prompt": "改成白色"})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_small_output_does_not_apply_before_confirmation(
+        self,
+        client,
+        sample_image,
+        low_resolution_result,
+    ):
+        original = np.asarray(Image.open(sample_image).convert("RGB"))
+        payload = self.prepare_low_resolution(client, sample_image)
+        assert payload["requires_upscale"] is True
+        assert payload["output_size"] == [60, 40]
+        assert max(payload["scale"]) > 1
+        assert np.array_equal(server.SESSION.working, original)
+        assert not server.SESSION.layers
+        mask = server.SESSION.mask.copy()
+        reply = client.post(
+            "/api/upscale/decision", json={"token": payload["token"], "accept": False}
+        )
+        assert reply.json()["cancelled"] is True
+        assert np.array_equal(server.SESSION.working, original)
+        assert np.array_equal(server.SESSION.mask, mask)
+        assert len(low_resolution_result) == 1
+
+    def test_accepting_small_output_does_not_regenerate(
+        self,
+        client,
+        sample_image,
+        low_resolution_result,
+    ):
+        from photoman.mask import prepare_masks
+
+        payload = self.prepare_low_resolution(client, sample_image)
+        original = server.SESSION.working.copy()
+        _, alpha = prepare_masks(server.SESSION.mask, dilate_px=16, feather_px=12)
+        reply = client.post(
+            "/api/upscale/decision", json={"token": payload["token"], "accept": True}
+        )
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["upscaled"] is True
+        assert len(low_resolution_result) == 1
+        assert len(server.SESSION.layers) == 1
+        assert np.array_equal(server.SESSION.working[alpha == 0], original[alpha == 0])
+        assert client.post("/api/undo").status_code == 200
+        assert np.array_equal(server.SESSION.working, original)
+        assert (
+            client.post(
+                "/api/upscale/decision", json={"token": payload["token"], "accept": True}
+            ).status_code
+            == 409
+        )
+
+    @pytest.mark.parametrize("change", ["mask", "image"])
+    def test_changed_scene_invalidates_pending_output(
+        self,
+        client,
+        sample_image,
+        low_resolution_result,
+        change,
+    ):
+        payload = self.prepare_low_resolution(client, sample_image)
+        if change == "mask":
+            client.post("/api/clear_mask")
+        else:
+            _open(client, sample_image)
+        reply = client.post(
+            "/api/upscale/decision", json={"token": payload["token"], "accept": True}
+        )
+        assert reply.status_code == 409
+        assert not server.SESSION.layers
+
     def test_available_without_api_key(self, client, monkeypatch):
         from photoman import codex_images, providers
 

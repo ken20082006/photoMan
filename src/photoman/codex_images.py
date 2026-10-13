@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from photoman.providers import EditResponse, ProviderError, _fit
+from photoman.providers import EditResponse, ProviderError
 
 CODEX_MODEL = "codex:local"
 TIMEOUT_SECONDS = 600
@@ -59,7 +59,7 @@ class CodexImageClient:
             paths = []
             for index, array in enumerate([image, *references]):
                 path = Path(directory) / f"input-{index + 1}.png"
-                Image.fromarray(_fit(array, 1536)).save(path)
+                Image.fromarray(array).save(path)
                 paths.append(str(path))
             instruction = (
                 "$imagegen Edit the first attached image using only the built-in image_gen tool. "
@@ -67,6 +67,9 @@ class CodexImageClient:
                 "The second image is a selection guide, "
                 "not an edit target; do not include its red tint in the result. "
                 "Produce exactly one image with the same framing and aspect ratio as the first. "
+                f"The target crop is {image.shape[1]}x{image.shape[0]} pixels. "
+                "Use that native output size if supported, otherwise the largest supported native "
+                "size at the same aspect ratio. Do not upscale the generated image yourself. "
                 "Keep objects outside the marked area in place. "
                 "Do not use API keys, external providers, browsers, drawing scripts, "
                 "or install tools. "
@@ -121,11 +124,8 @@ class CodexImageClient:
         try:
             with Image.open(outputs[0]) as produced:
                 produced = produced.convert("RGB")
-                if produced.size != (image.shape[1], image.shape[0]):
-                    produced = produced.resize(
-                        (image.shape[1], image.shape[0]), Image.Resampling.LANCZOS,
-                    )
-                result = np.asarray(produced)
+                # 保留工具交回的尺寸，讓合成流程在放大前要求使用者確認。
+                result = np.asarray(produced).copy()
         except (OSError, ValueError) as exc:
             raise ProviderError("無法讀取 Codex 產生的圖片。") from exc
         return EditResponse(result, None, time.monotonic() - started, CODEX_MODEL)

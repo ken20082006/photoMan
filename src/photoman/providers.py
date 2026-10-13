@@ -29,12 +29,6 @@ from PIL import Image
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# 送出之前把裁切圖縮到這個尺寸。
-# 模型的原生輸出多數是 1–4 MP，送更大的圖只會被內部縮掉，
-# 白白增加上傳時間與 token 成本。
-MAX_SEND_PX = 1536
-
-
 class ProviderError(RuntimeError):
     """呼叫雲端模型失敗。訊息要能直接顯示給使用者看。"""
 
@@ -52,6 +46,8 @@ class ImageModel:
 
 @dataclass(frozen=True)
 class EditResponse:
+    """保持供應商交回的圖片尺寸，放大須由合成流程先取得確認。"""
+
     image: np.ndarray
     cost_usd: float | None
     seconds: float
@@ -172,7 +168,7 @@ class OpenRouterClient:
         if not prompt.strip():
             raise ProviderError("請描述要做甚麼，例如「移除中間的人」或「加一隻小狗」。")
 
-        sent = [_fit(image, MAX_SEND_PX)] + [_fit(ref, MAX_SEND_PX) for ref in references]
+        sent = [image, *references]
         body: dict = {
             "model": model,
             "prompt": prompt.strip(),
@@ -208,12 +204,6 @@ class OpenRouterClient:
 
         image_bytes = base64.b64decode(items[0]["b64_json"])
         produced = _decode(image_bytes)
-
-        # 模型的輸出尺寸未必等於送出的尺寸，要縮放回去才能合成。
-        if produced.shape[:2] != image.shape[:2]:
-            produced = np.asarray(
-                Image.fromarray(produced).resize((image.shape[1], image.shape[0]), Image.LANCZOS)
-            )
 
         return EditResponse(
             image=produced,

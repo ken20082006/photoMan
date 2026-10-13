@@ -41,6 +41,7 @@ def test_uses_builtin_tool_and_only_this_threads_image(configured, monkeypatch):
         inputs = command[command.index("--image") + 1].split(",")
         assert len(inputs) == 2
         assert all(Path(path).is_file() for path in inputs)
+        assert all(Image.open(path).size == (2048, 32) for path in inputs)
         directory = configured / THREAD
         directory.mkdir()
         Image.new("RGB", (20, 20), "blue").save(directory / "generated.png")
@@ -48,11 +49,11 @@ def test_uses_builtin_tool_and_only_this_threads_image(configured, monkeypatch):
         return subprocess.CompletedProcess(command, 0, events(), "")
 
     monkeypatch.setattr(subprocess, "run", run)
-    array = np.zeros((32, 48, 3), dtype=np.uint8)
+    array = np.zeros((32, 2048, 3), dtype=np.uint8)
     response = codex_images.CodexImageClient().edit(
         array, "改成藍色", model="codex:local", references=[array],
     )
-    assert response.image.shape == array.shape
+    assert response.image.shape == (20, 20, 3)
     assert np.all(response.image[..., 2] == 255)
     assert response.cost_usd is None
 
